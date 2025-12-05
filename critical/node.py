@@ -2,7 +2,7 @@ import socket
 import time
 import random
 
-COORD_IP = '192.168.1.101'
+COORD_IP = '192.168.56.1'
 PORT = 5000
 
 def run_node():
