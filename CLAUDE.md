@@ -28,7 +28,7 @@ This is a distributed critical section implementation using a centralized coordi
    - Duplicate detection using per-node sequence number tracking
    - Term-based consensus support for future leader election
    - Thread-safe implementation with `threading.Lock()` for state synchronization
-   - Binds to `0.0.0.0:5000` (all interfaces) for maximum connectivity
+   - Binds to `0.0.0.0:50000` (all interfaces) for maximum connectivity
 
 2. **Protocol Layer** (`critical/protocol.py`):
    - **Message Types**: 14 dataclasses covering all communication patterns
@@ -86,7 +86,7 @@ JSON-serialized messages with structured fields:
 ### Network Configuration & Technical Details
 
 #### Socket Configuration
-- **Coordinator**: UDP socket bound to `0.0.0.0:5000`
+- **Coordinator**: UDP socket bound to `0.0.0.0:50000`
   - `SO_REUSEADDR` enabled for rapid restart capability
   - Non-blocking operation with timeout for graceful shutdown
   - Handles `OSError` for port conflicts and socket cleanup
@@ -252,7 +252,7 @@ No formal test framework is configured. Manual testing approach:
 
 #### Configuration Parameters
 All hardcoded values that could be made configurable:
-- `HOST = '0.0.0.0'` and `PORT = 5000` (coordinator binding)
+- `HOST = '0.0.0.0'` and `PORT = 50000` (coordinator binding)
 - `COORD_IP = '192.168.1.101'` (node target)
 - `LEASE_DURATION = 5.0` (lease timeout)
 - Heartbeat interval (2.0 seconds)
@@ -295,7 +295,7 @@ jupyter nbextension enable --py widgetsnbextension
 - **Python Version**: 3.14+ (as specified in pyproject.toml)
 - **Package Manager**: `uv` (recommended) or `pip`
 - **Jupyter Notebook**: Required for GUI dashboard
-- **Network Access**: UDP communication on port 5000
+- **Network Access**: UDP communication on port 50000
 - **Operating System**: Cross-platform (tested on Linux/macOS/Windows)
 
 ## Design Philosophy & Trade-offs
@@ -313,6 +313,7 @@ This implementation prioritizes educational clarity over production robustness:
 - Clear system state visualization
 - Easy to reason about and debug
 - FIFO fairness guaranteed
+- Uses ephemeral port 50000 to avoid conflicts with well-known services
 
 **Disadvantages:**
 - Single point of failure

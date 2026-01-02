@@ -5,7 +5,7 @@ from typing import Optional
 from protocol import REQ, GRANT, REL, HB, ACK, NACK, ReliableSender, serialize, deserialize, Message
 
 COORD_IP = '192.168.1.101'
-PORT = 5000
+PORT = 50000
 
 
 def run_smart_node():

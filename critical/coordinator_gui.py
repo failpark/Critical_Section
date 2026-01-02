@@ -12,7 +12,7 @@ class CoordinatorGUI:
     Extracted from the original notebook for better separation of concerns.
     """
     
-    def __init__(self, host='0.0.0.0', port=5000, lease_duration=5.0):
+    def __init__(self, host='0.0.0.0', port=50000, lease_duration=5.0):
         self.coordinator = Coordinator(host, port, lease_duration)
         
         # GUI widgets
@@ -139,7 +139,7 @@ class CoordinatorGUI:
         self.coordinator.stop()
 
 
-def start_coordinator_gui(host='0.0.0.0', port=5000, lease_duration=5.0):
+def start_coordinator_gui(host='0.0.0.0', port=50000, lease_duration=5.0):
     """Convenience function to start coordinator with GUI."""
     gui = CoordinatorGUI(host, port, lease_duration)
     gui.start()

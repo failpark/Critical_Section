@@ -3,7 +3,7 @@ import time
 import random
 
 COORD_IP = '192.168.1.101'
-PORT = 5000
+PORT = 50000
 
 def run_node():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

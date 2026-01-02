@@ -262,7 +262,7 @@ if __name__ == "__main__":
 		COORD_HB_ACK(node_id="backup", seq=1, term=1),
 		ELECTION(node_id="Node_99", seq=1, term=1, candidate_id="Node_99", proposed_term=2),
 		OK(node_id="Node_100", seq=1, term=2, responder_id="Node_100"),
-		COORDINATOR(node_id="Node_100", seq=1, term=2, coord_id="Node_100", coord_addr=("192.168.1.100", 5000)),
+		COORDINATOR(node_id="Node_100", seq=1, term=2, coord_id="Node_100", coord_addr=("192.168.1.100", 50000)),
 		STEP_DOWN(node_id="coord", seq=1, term=1)
 	]
 	

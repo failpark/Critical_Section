@@ -12,7 +12,7 @@ class Coordinator:
     Extracted from Jupyter notebook for better modularity.
     """
     
-    def __init__(self, host='0.0.0.0', port=5000, lease_duration=5.0):
+    def __init__(self, host='0.0.0.0', port=50000, lease_duration=5.0):
         self.host = host
         self.port = port
         self.lease_duration = lease_duration
