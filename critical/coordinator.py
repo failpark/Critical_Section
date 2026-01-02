@@ -5,7 +5,7 @@ import argparse
 from collections import deque
 from typing import Optional, Dict, List, Tuple, Any
 from dataclasses import dataclass, field
-from protocol import REQ, GRANT, REL, HB, ACK, NACK, SYNC, SYNC_ACK, serialize, deserialize, Message
+from protocol import REQ, GRANT, REL, HB, ACK, NACK, SYNC, SYNC_ACK, COORD_HB, COORD_HB_ACK, COORDINATOR, serialize, deserialize, Message
 
 
 @dataclass
@@ -20,6 +20,9 @@ class CoordinatorState:
 	backup_addrs: List[Tuple[str, int]] = field(default_factory=list)
 	backup_status: Dict[str, str] = field(default_factory=dict)
 	sync_seq_counter: int = 0
+	last_primary_hb: float = 0.0
+	primary_suspected_failed: bool = False
+	heartbeat_seq_counter: int = 0
 
 
 @dataclass
@@ -86,6 +89,7 @@ class Coordinator:
         self.coord_sock = None
         self.client_thread = None
         self.coord_thread = None
+        self.heartbeat_thread = None
     
     def start(self):
         """Start the coordinator server."""
@@ -99,6 +103,10 @@ class Coordinator:
         self.coord_thread = threading.Thread(target=self._coord_server, daemon=True)
         self.client_thread.start()
         self.coord_thread.start()
+        
+        if self.state.role == 'PRIMARY' and self.state.backup_addrs:
+            self.heartbeat_thread = threading.Thread(target=self._heartbeat_sender, daemon=True)
+            self.heartbeat_thread.start()
         
         print(f"running as {self.state.role}")
         print(f"Client UDP Server läuft auf {self.client_port}")
@@ -143,7 +151,9 @@ class Coordinator:
                 'running': self.running,
                 'role': self.state.role,
                 'backup_status': self.state.backup_status.copy(),
-                'term': self.state.term
+                'term': self.state.term,
+                'primary_suspected_failed': self.state.primary_suspected_failed,
+                'last_primary_hb': self.state.last_primary_hb
             }
     
     def _client_server(self):
@@ -240,6 +250,10 @@ class Coordinator:
         
         while self.running:
             try:
+                # Check for primary failure (BACKUP only)
+                if self.state.role == 'BACKUP':
+                    self._check_primary_failure()
+                
                 try:
                     data, addr = self.coord_sock.recvfrom(1024)
                 except socket.timeout:
@@ -267,6 +281,14 @@ class Coordinator:
                             ack_msg = SYNC_ACK(node_id=self.node_id, seq=msg.seq, term=self.state.term)
                             self.coord_sock.sendto(serialize(ack_msg), addr)
                             print(f"Applied SYNC: holder={self.state.current_holder}, queue_len={len(self.state.queue)}, term={self.state.term}")
+                    
+                    elif isinstance(msg, COORD_HB):
+                        self.state.last_primary_hb = time.time()
+                        self.state.primary_suspected_failed = False
+                        self.state.term = max(self.state.term, msg.term)
+                        
+                        ack_msg = COORD_HB_ACK(node_id=self.node_id, seq=msg.seq, term=self.state.term)
+                        self.coord_sock.sendto(serialize(ack_msg), addr)
                         
             except Exception as e:
                 if self.running:
@@ -390,6 +412,99 @@ class Coordinator:
         self.state.queue = deque(snapshot.queue_list)
         self.state.known_nodes = set(snapshot.known_nodes_list)
         self.state.last_seen_seq = snapshot.last_seen_seq.copy()
+
+    def _heartbeat_sender(self):
+        """Send COORD_HB to all backup coordinators every 1 second (PRIMARY only)."""
+        print("Heartbeat sender thread started")
+        
+        while self.running and self.state.role == 'PRIMARY':
+            time.sleep(1.0)
+            
+            if not self.running:
+                break
+                
+            with self.state_lock:
+                if not self.state.backup_addrs:
+                    continue
+                    
+                self.state.heartbeat_seq_counter += 1
+                hb_msg = COORD_HB(node_id=self.node_id, seq=self.state.heartbeat_seq_counter, term=self.state.term)
+                hb_data = serialize(hb_msg)
+                
+                if not hb_data:
+                    continue
+                
+                for backup_addr in self.state.backup_addrs:
+                    try:
+                        coord_addr = (backup_addr[0], backup_addr[1] + 1)
+                        backup_key = f"{backup_addr[0]}:{backup_addr[1]}"
+                        
+                        self.coord_sock.settimeout(0.5)
+                        self.coord_sock.sendto(hb_data, coord_addr)
+                        
+                        try:
+                            response_data, response_addr = self.coord_sock.recvfrom(1024)
+                            response = deserialize(response_data)
+                            
+                            if (isinstance(response, COORD_HB_ACK) and 
+                                response.seq == self.state.heartbeat_seq_counter and 
+                                response_addr[0] == backup_addr[0]):
+                                self.state.backup_status[backup_key] = "healthy"
+                            else:
+                                self.state.backup_status[backup_key] = "suspect"
+                                
+                        except socket.timeout:
+                            self.state.backup_status[backup_key] = "suspect"
+                            
+                    except Exception as e:
+                        backup_key = f"{backup_addr[0]}:{backup_addr[1]}"
+                        self.state.backup_status[backup_key] = "suspect"
+                        
+                self.coord_sock.settimeout(None)
+        
+        print("Heartbeat sender thread beendet")
+
+    def _check_primary_failure(self):
+        """Check for primary failure and update status (BACKUP only) - must be called within coord_server loop."""
+        if self.state.role != 'BACKUP':
+            return
+            
+        current_time = time.time()
+        
+        with self.state_lock:
+            if self.state.last_primary_hb > 0 and current_time - self.state.last_primary_hb > 2.5:
+                if not self.state.primary_suspected_failed:
+                    self.state.primary_suspected_failed = True
+                    print("primary failure detected")
+                    self._broadcast_new_coordinator()
+
+    def _broadcast_new_coordinator(self):
+        """Broadcast COORDINATOR message to inform nodes of new coordinator - must be called within state_lock."""
+        if self.state.role != 'BACKUP':
+            return
+            
+        try:
+            broadcast_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            broadcast_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            
+            coord_msg = COORDINATOR(
+                node_id=self.node_id, 
+                seq=1, 
+                term=self.state.term,
+                coord_id=self.node_id,
+                coord_addr=(self.host if self.host != '0.0.0.0' else '127.0.0.1', self.client_port)
+            )
+            
+            broadcast_data = serialize(coord_msg)
+            if broadcast_data:
+                broadcast_sock.sendto(broadcast_data, ('255.255.255.255', self.client_port))
+                broadcast_sock.sendto(broadcast_data, ('127.0.0.1', self.client_port))
+                print(f"Broadcast COORDINATOR message: {coord_msg.coord_addr}")
+            
+            broadcast_sock.close()
+            
+        except Exception as e:
+            print(f"Failed to broadcast coordinator: {e}")
 
 
 def parse_peers(peers_str: str) -> List[Tuple[str, int]]:
