@@ -21,14 +21,14 @@ This is a distributed critical section implementation using a centralized coordi
 ### Core Components
 
 1. **Coordinator System**: 
-   - **Core Logic** (`critical/coordinator.py`): Main coordinator implementation as a reusable class
+   - **Core Logic** (`critical/coordinator.py`): Enhanced with full protocol layer integration
    - **GUI Interface** (`critical/coordinator_gui.py`): Jupyter widget-based dashboard wrapper  
    - **Notebook Interface** (`critical/coordinator.ipynb`): Interactive Jupyter notebook demo
-   - Manages critical section access using FIFO queue (`collections.deque`)
-   - Real-time visualization dashboard with node state tracking
+   - Protocol-aware message handling with ACK/NACK responses
+   - Duplicate detection using per-node sequence number tracking
+   - Term-based consensus support for future leader election
    - Thread-safe implementation with `threading.Lock()` for state synchronization
    - Binds to `0.0.0.0:5000` (all interfaces) for maximum connectivity
-   - Implements lease-based system with automatic expiry and heartbeat renewal
 
 2. **Protocol Layer** (`critical/protocol.py`):
    - **Message Types**: 14 dataclasses covering all communication patterns
@@ -43,10 +43,11 @@ This is a distributed critical section implementation using a centralized coordi
    - **Type Safety**: Full type hints with Python 3.14+ annotations
 
 3. **Smart Node Template** (`critical/node.py`): 
-   - Advanced node implementation with random ID generation (`Node_{10-99}`)
-   - Full heartbeat support (sends HB every 2 seconds while in critical section)
-   - Robust error handling with timeout and retry logic (2-second socket timeout)
-   - Implements complete protocol state machine (IDLE → REQUEST → GRANTED → RELEASE)
+   - Enhanced protocol implementation using structured messages from `protocol.py`
+   - Full ACK/NACK handling with proper error logging and retry mechanisms
+   - Term tracking for distributed consensus compatibility
+   - ReliableSender integration for message delivery guarantees
+   - Complete protocol state machine: IDLE → REQ+ACK → GRANT → HB+ACK → REL+ACK
    - Configured for coordinator IP `192.168.1.101`
 
 4. **Simple Node Instances** (`critical/nodes/node1.py` through `node5.py`):
@@ -79,6 +80,8 @@ JSON-serialized messages with structured fields:
 - **lease_expiry**: Timestamp when current lease expires
 - **queue**: FIFO queue of (node_id, address) pairs awaiting access
 - **known_nodes**: Set of all nodes that have ever contacted coordinator
+- **term**: Current consensus term for leader election compatibility
+- **last_seen_seq**: Dict mapping node_id to last processed sequence number
 
 ### Network Configuration & Technical Details
 
@@ -212,9 +215,18 @@ No formal test framework is configured. Manual testing approach:
 #### Smart Node (`node.py`) Flow
 1. **Random ID Generation**: `Node_{random.randint(10, 99)}`
 2. **Work Simulation**: 2-4 second idle periods between requests
-3. **Request Phase**: Retry loop with timeout handling until `GRANT` received
-4. **Critical Section Phase**: 3-12 second work simulation with 2-second heartbeats
-5. **Release Phase**: Send `REL` and return to idle
+3. **Request Phase**: 
+   - Send REQ message via ReliableSender
+   - Wait for ACK (retry on timeout/NACK)
+   - Wait for separate GRANT message
+   - Update term from coordinator responses
+4. **Critical Section Phase**: 
+   - 3-12 second work simulation
+   - Send HB every 2 seconds via ReliableSender
+   - Handle ACK/NACK responses for heartbeats
+5. **Release Phase**: 
+   - Send REL via ReliableSender
+   - Wait for ACK confirmation
 
 #### Simple Node (`nodes/node*.py`) Flow
 1. **Fixed ID**: Hardcoded as `Node_1`, `Node_2`, etc.

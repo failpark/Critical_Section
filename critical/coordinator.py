@@ -2,6 +2,8 @@ import socket
 import threading
 import time
 from collections import deque
+from typing import Optional, Dict
+from protocol import REQ, GRANT, REL, HB, ACK, NACK, serialize, deserialize, Message
 
 
 class Coordinator:
@@ -22,6 +24,8 @@ class Coordinator:
         self.current_holder = None
         self.lease_expiry = 0.0
         self.known_nodes = set()
+        self.term = 0
+        self.last_seen_seq: Dict[str, int] = {}
         
         # Network
         self.server_sock = None
@@ -96,7 +100,8 @@ class Coordinator:
                         next_id, next_addr = self.queue.popleft()
                         self.current_holder = next_id
                         self.lease_expiry = time.time() + self.lease_duration
-                        self.server_sock.sendto(b'GRANT', next_addr)
+                        grant_msg = GRANT(node_id=next_id, seq=1, term=self.term, lease_duration=self.lease_duration)
+                        self.server_sock.sendto(serialize(grant_msg), next_addr)
                 
                 try:
                     data, addr = self.server_sock.recvfrom(1024)
@@ -105,27 +110,38 @@ class Coordinator:
                 except OSError:
                     break  # Socket closed
                 
-                msg = data.decode()
-                
-                if msg == "INTERNAL_STOP":
+                if data.startswith(b"INTERNAL_STOP"):
                     print("Stop-Signal empfangen.")
                     break
                 
-                parts = msg.split()
-                if len(parts) < 2:
+                msg = deserialize(data)
+                if not msg or not isinstance(msg, Message):
                     continue
                 
-                cmd, node_id = parts[0], parts[1]
-                
                 with self.state_lock:
-                    self.known_nodes.add(node_id)
+                    self.known_nodes.add(msg.node_id)
                     
-                    if cmd == 'REQ':
-                        self._handle_request(node_id, addr)
-                    elif cmd == 'HB':
-                        self._handle_heartbeat(node_id)
-                    elif cmd == 'REL':
-                        self._handle_release(node_id)
+                    # Check for duplicates
+                    if msg.node_id in self.last_seen_seq and msg.seq <= self.last_seen_seq[msg.node_id]:
+                        nack_msg = NACK(node_id="coordinator", seq=1, term=self.term, msg_type=msg.type, reason="duplicate")
+                        self.server_sock.sendto(serialize(nack_msg), addr)
+                        continue
+                    
+                    self.last_seen_seq[msg.node_id] = msg.seq
+                    self.term = max(self.term, msg.term)
+                    
+                    if isinstance(msg, REQ):
+                        self._handle_request(msg.node_id, addr)
+                        ack_msg = ACK(node_id="coordinator", seq=1, term=self.term, msg_type="REQ")
+                        self.server_sock.sendto(serialize(ack_msg), addr)
+                    elif isinstance(msg, HB):
+                        self._handle_heartbeat(msg.node_id)
+                        ack_msg = ACK(node_id="coordinator", seq=1, term=self.term, msg_type="HB")
+                        self.server_sock.sendto(serialize(ack_msg), addr)
+                    elif isinstance(msg, REL):
+                        self._handle_release(msg.node_id)
+                        ack_msg = ACK(node_id="coordinator", seq=1, term=self.term, msg_type="REL")
+                        self.server_sock.sendto(serialize(ack_msg), addr)
                         
             except Exception as e:
                 if self.running:
@@ -141,11 +157,13 @@ class Coordinator:
             # Grant immediately
             self.current_holder = node_id
             self.lease_expiry = time.time() + self.lease_duration
-            self.server_sock.sendto(b'GRANT', addr)
+            grant_msg = GRANT(node_id=node_id, seq=1, term=self.term, lease_duration=self.lease_duration)
+            self.server_sock.sendto(serialize(grant_msg), addr)
         elif self.current_holder == node_id:
             # Renew lease for same node
             self.lease_expiry = time.time() + self.lease_duration
-            self.server_sock.sendto(b'GRANT', addr)
+            grant_msg = GRANT(node_id=node_id, seq=1, term=self.term, lease_duration=self.lease_duration)
+            self.server_sock.sendto(serialize(grant_msg), addr)
         else:
             # Queue the request if not already queued
             if node_id not in [x[0] for x in self.queue]:
@@ -164,7 +182,8 @@ class Coordinator:
                 next_id, next_addr = self.queue.popleft()
                 self.current_holder = next_id
                 self.lease_expiry = time.time() + self.lease_duration
-                self.server_sock.sendto(b'GRANT', next_addr)
+                grant_msg = GRANT(node_id=next_id, seq=1, term=self.term, lease_duration=self.lease_duration)
+                self.server_sock.sendto(serialize(grant_msg), next_addr)
             else:
                 # No one waiting
                 self.current_holder = None
