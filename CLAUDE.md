@@ -10,8 +10,10 @@ This is a distributed critical section implementation using a centralized coordi
 
 ### Core Components
 
-1. **Coordinator** (`critical/coordinator.ipynb`): 
-   - Jupyter notebook implementing the central coordinator server
+1. **Coordinator System**: 
+   - **Core Logic** (`critical/coordinator.py`): Main coordinator implementation as a reusable class
+   - **GUI Interface** (`critical/coordinator_gui.py`): Jupyter widget-based dashboard wrapper  
+   - **Notebook Interface** (`critical/coordinator.ipynb`): Interactive Jupyter notebook demo
    - Manages critical section access using FIFO queue (`collections.deque`)
    - Real-time visualization dashboard with node state tracking
    - Thread-safe implementation with `threading.Lock()` for state synchronization
@@ -103,15 +105,31 @@ All messages are UTF-8 encoded strings sent via UDP:
 
 ## Development Commands
 
-Since this is a pure Python project without build tools:
+This is a Python project managed with `uv` package manager and `pyproject.toml`:
+
+### Installation & Setup
+```bash
+# Install dependencies using uv
+uv sync
+
+# Alternative: Install directly with pip
+pip install ipywidgets jupyter
+```
 
 ### Running the System
 
 1. **Start Coordinator**:
    ```bash
+   # Option 1: Standalone coordinator (no GUI, command line only)
+   python critical/coordinator.py
+   
+   # Option 2: Jupyter notebook with interactive GUI dashboard
    jupyter notebook critical/coordinator.ipynb
    # Execute all cells in sequence to start the coordinator server
    # Dashboard will appear inline with real-time node status
+   
+   # Option 3: Use the GUI module programmatically
+   python -c "from critical.coordinator_gui import start_coordinator_gui; start_coordinator_gui()"
    ```
 
 2. **Start Nodes**:
@@ -138,29 +156,36 @@ No formal test framework is configured. Manual testing approach:
 
 ## Technical Implementation Details
 
-### Coordinator Core Logic (`coordinator.ipynb`)
+### Coordinator System Architecture
 
-#### State Variables (Protected by `state_lock`)
-- `running`: Global shutdown flag for clean termination
-- `queue`: `collections.deque` storing `(node_id, address)` tuples
-- `current_holder`: String ID of token holder or `None`
-- `lease_expiry`: Float timestamp when current lease expires
-- `known_nodes`: Set of all discovered node IDs for GUI management
+#### Core Coordinator (`coordinator.py`)
+- **Coordinator Class**: Reusable coordinator implementation with clean separation of concerns
+- **State Variables** (Protected by `state_lock`):
+  - `running`: Global shutdown flag for clean termination
+  - `queue`: `collections.deque` storing `(node_id, address)` tuples
+  - `current_holder`: String ID of token holder or `None`
+  - `lease_expiry`: Float timestamp when current lease expires
+  - `known_nodes`: Set of all discovered node IDs for GUI management
+
+#### GUI Wrapper (`coordinator_gui.py`)
+- **CoordinatorGUI Class**: Jupyter widgets interface wrapping core coordinator
+- **Widget Management**: Dynamic node discovery with cached widget creation
+- **Real-time Updates**: Separate thread for 10 FPS dashboard updates
 
 #### Critical Sections in Code
-1. **Message Processing Loop** (`udp_server()` function):
+1. **Message Processing Loop** (`_udp_server()` method):
    - Handles REQ: Immediate grant or queue insertion
    - Handles REL: Token transfer to next queued node
    - Handles HB: Lease renewal for current holder
    - Automatic grant sending on lease expiry
 
-2. **Dashboard Update Loop** (`update_dashboard()` function):
+2. **Dashboard Update Loop** (`_update_dashboard()` method in GUI):
    - Real-time widget state updates
    - Lease countdown calculations
    - Dynamic widget creation/management
 
 #### Shutdown Mechanism
-- **Stop Button**: Triggers `trigger_stop()` callback
+- **Stop Button**: Triggers `_trigger_stop()` callback
 - **Internal Signal**: Sends "INTERNAL_STOP" UDP message to wake up server thread
 - **Socket Cleanup**: Explicit `socket.close()` in finally blocks
 - **Thread Cleanup**: Daemon threads auto-terminate when main thread exits
@@ -224,7 +249,10 @@ All hardcoded values that could be made configurable:
 
 ### Installation Commands
 ```bash
-# Install Jupyter and widget dependencies
+# Install using uv (recommended)
+uv sync
+
+# Or install manually with pip
 pip install ipywidgets IPython jupyter
 
 # Enable widget extensions (may be required)
@@ -232,8 +260,9 @@ jupyter nbextension enable --py widgetsnbextension
 ```
 
 ### Environment Requirements
-- **Python Version**: 3.6+ (uses f-strings)
-- **Jupyter Notebook**: Required for coordinator dashboard
+- **Python Version**: 3.14+ (as specified in pyproject.toml)
+- **Package Manager**: `uv` (recommended) or `pip`
+- **Jupyter Notebook**: Required for GUI dashboard
 - **Network Access**: UDP communication on port 5000
 - **Operating System**: Cross-platform (tested on Linux/macOS/Windows)
 
