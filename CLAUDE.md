@@ -30,14 +30,26 @@ This is a distributed critical section implementation using a centralized coordi
    - Binds to `0.0.0.0:5000` (all interfaces) for maximum connectivity
    - Implements lease-based system with automatic expiry and heartbeat renewal
 
-2. **Smart Node Template** (`critical/node.py`): 
+2. **Protocol Layer** (`critical/protocol.py`):
+   - **Message Types**: 14 dataclasses covering all communication patterns
+     - Client ↔ Coordinator: REQ, GRANT, REL, HB, ACK, NACK (6 types)
+     - Coordinator Cluster: SYNC, SYNC_ACK, COORD_HB, COORD_HB_ACK (4 types)
+     - Election: ELECTION, OK, COORDINATOR, STEP_DOWN (4 types)
+   - **Serialization**: JSON-based encoding/decoding with UTF-8 transport
+   - **ReliableSender**: UDP reliability layer with sequence numbers and retries
+     - Per-destination sequence counters for message ordering
+     - Duplicate detection via `last_seen_seq` tracking
+     - Configurable timeout (0.5s) and retry count (3 attempts)
+   - **Type Safety**: Full type hints with Python 3.14+ annotations
+
+3. **Smart Node Template** (`critical/node.py`): 
    - Advanced node implementation with random ID generation (`Node_{10-99}`)
    - Full heartbeat support (sends HB every 2 seconds while in critical section)
    - Robust error handling with timeout and retry logic (2-second socket timeout)
    - Implements complete protocol state machine (IDLE → REQUEST → GRANTED → RELEASE)
    - Configured for coordinator IP `192.168.1.101`
 
-3. **Simple Node Instances** (`critical/nodes/node1.py` through `node5.py`):
+4. **Simple Node Instances** (`critical/nodes/node1.py` through `node5.py`):
    - Minimalist node implementations with fixed IDs (`Node_1`, `Node_2`, etc.)
    - Basic REQ/REL protocol without heartbeat mechanism
    - No error handling or timeout management (blocking `recv()` calls)
@@ -46,26 +58,21 @@ This is a distributed critical section implementation using a centralized coordi
 ### Protocol Specification
 
 #### Message Format
-All messages are UTF-8 encoded strings sent via UDP:
+Two protocol layers exist:
 
+**Legacy Protocol** (simple string-based):
 - **REQ {node_id}**: Node requests critical section access
-  - Coordinator response: Either immediate `GRANT` or queuing for later grant
-  - If node already holds token: lease is renewed, immediate `GRANT` sent
-  - If duplicate request while queued: ignored (prevents queue pollution)
-
 - **REL {node_id}**: Node releases critical section
-  - Only valid from current token holder
-  - Triggers immediate token transfer to next queued node if any
-  - Sends `GRANT` to next node automatically
-
 - **HB {node_id}**: Heartbeat to maintain lease
-  - Only valid from current token holder
-  - Resets lease expiry to current_time + LEASE_DURATION
-  - No response sent (fire-and-forget)
-
 - **GRANT**: Coordinator grants access to requesting node
-  - Unidirectional message (coordinator → node)
-  - Indicates token ownership and critical section access granted
+
+**Enhanced Protocol** (`critical/protocol.py`):
+JSON-serialized messages with structured fields:
+- **Common Fields**: `node_id`, `seq`, `term`, `type`
+- **Client ↔ Coordinator**: REQ, GRANT(lease_duration), REL, HB, ACK(msg_type), NACK(msg_type, reason)
+- **Coordinator Cluster**: SYNC(state_snapshot), SYNC_ACK, COORD_HB, COORD_HB_ACK
+- **Election**: ELECTION(candidate_id, proposed_term), OK(responder_id), COORDINATOR(coord_id, coord_addr), STEP_DOWN
+- **Reliability**: Sequence numbers for deduplication, automatic retries, ACK/NACK responses
 
 #### State Management
 - **current_holder**: Currently active node ID (None if no holder)
@@ -249,6 +256,9 @@ All hardcoded values that could be made configurable:
 - `time`: Timestamp handling and sleep operations
 - `random`: Random ID generation and work duration simulation
 - `collections`: `deque` for FIFO queue implementation
+- `json`: Message serialization/deserialization for protocol layer
+- `dataclasses`: Structured message type definitions
+- `abc`: Abstract base classes for message protocol
 
 ### External Dependencies
 - `ipywidgets`: Interactive GUI widgets for Jupyter dashboard
