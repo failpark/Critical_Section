@@ -14,21 +14,29 @@ This is a distributed critical section implementation using a centralized coordi
 - **Typing**: Use Python type hints throughout (from typing import ...)
 - **Conciseness**: Prefer compact, readable implementations
 - **Updates**: After each change, update this CLAUDE.md file to reflect new state
-- **Commands**: User runs external commands (e.g., `cd critical && python3 coordinator.py`)
+- **Commands**: User runs external commands (e.g., `uv run critical/coordinator.py`)
 
 ## Architecture
 
 ### Core Components
 
-1. **Coordinator System**: 
-   - **Core Logic** (`critical/coordinator.py`): Enhanced with full protocol layer integration
+1. **Coordinator System with PRIMARY/BACKUP Roles**: 
+   - **Core Logic** (`critical/coordinator.py`): Enhanced with PRIMARY/BACKUP role support and state replication
    - **GUI Interface** (`critical/coordinator_gui.py`): Jupyter widget-based dashboard wrapper  
    - **Notebook Interface** (`critical/coordinator.ipynb`): Interactive Jupyter notebook demo
+   - **Role-Based Architecture**:
+     - PRIMARY: Processes client requests, maintains authoritative state, sends SYNC to backups
+     - BACKUP: Stores replicated state, redirects client requests with NACK, receives SYNC updates
+   - **Dual Network Architecture**:
+     - Port 50000: Client communication (REQ/REL/HB from nodes)
+     - Port 50001: Inter-coordinator communication (SYNC/SYNC_ACK between coordinators)
+   - **State Management**: CoordinatorState dataclass with full replication support
+   - **StateSnapshot**: Serializable state container with to_dict()/from_dict() methods
    - Protocol-aware message handling with ACK/NACK responses
    - Duplicate detection using per-node sequence number tracking
    - Term-based consensus support for future leader election
    - Thread-safe implementation with `threading.Lock()` for state synchronization
-   - Binds to `0.0.0.0:50000` (all interfaces) for maximum connectivity
+   - CLI arguments: --role primary|backup --id <int> --peers <ip:port,ip:port>
 
 2. **Protocol Layer** (`critical/protocol.py`):
    - **Message Types**: 14 dataclasses covering all communication patterns
@@ -138,10 +146,17 @@ pip install ipywidgets jupyter
 
 ### Running the System
 
-1. **Start Coordinator**:
+1. **Start Coordinator with PRIMARY/BACKUP Roles**:
    ```bash
-   # Option 1: Standalone coordinator (no GUI, command line only)
-   python critical/coordinator.py
+   # PRIMARY coordinator (processes client requests)
+   uv run critical/coordinator.py --role primary --id 100 --peers 192.168.1.102:50000,192.168.1.103:50000
+   
+   # BACKUP coordinator (replicates state, redirects clients)
+   uv run critical/coordinator.py --role backup --id 98 --peers 192.168.1.101:50000
+   uv run critical/coordinator.py --role backup --id 99 --peers 192.168.1.101:50000
+   
+   # Legacy: Single coordinator (backwards compatibility)
+   uv run critical/coordinator.py --role primary --id 100
    
    # Option 2: Jupyter notebook with interactive GUI dashboard
    jupyter notebook critical/coordinator.ipynb
@@ -149,20 +164,20 @@ pip install ipywidgets jupyter
    # Dashboard will appear inline with real-time node status
    
    # Option 3: Use the GUI module programmatically
-   python -c "from critical.coordinator_gui import start_coordinator_gui; start_coordinator_gui()"
+   uv run python -c "from critical.coordinator_gui import start_coordinator_gui; start_coordinator_gui()"
    ```
 
 2. **Start Nodes**:
    ```bash
    # Simple nodes (basic REQ/REL only)
-   python critical/nodes/node1.py
-   python critical/nodes/node2.py
-   python critical/nodes/node3.py
-   python critical/nodes/node4.py
-   python critical/nodes/node5.py
+   uv run critical/nodes/node1.py
+   uv run critical/nodes/node2.py
+   uv run critical/nodes/node3.py
+   uv run critical/nodes/node4.py
+   uv run critical/nodes/node5.py
    
    # Smart node (with heartbeat and error handling)
-   python critical/node.py
+   uv run critical/node.py
    ```
 
 ### Testing Strategy
@@ -179,13 +194,23 @@ No formal test framework is configured. Manual testing approach:
 ### Coordinator System Architecture
 
 #### Core Coordinator (`coordinator.py`)
-- **Coordinator Class**: Reusable coordinator implementation with clean separation of concerns
-- **State Variables** (Protected by `state_lock`):
-  - `running`: Global shutdown flag for clean termination
-  - `queue`: `collections.deque` storing `(node_id, address)` tuples
+- **Coordinator Class**: Reusable coordinator implementation with PRIMARY/BACKUP role support
+- **CoordinatorState**: Centralized state management with replication support
+  - `term`: Current consensus term for distributed coordination
+  - `role`: PRIMARY|BACKUP|CANDIDATE role designation
   - `current_holder`: String ID of token holder or `None`
   - `lease_expiry`: Float timestamp when current lease expires
+  - `queue`: `collections.deque` storing `(node_id, address, seq)` tuples
   - `known_nodes`: Set of all discovered node IDs for GUI management
+  - `last_seen_seq`: Dict tracking per-node sequence numbers for deduplication
+  - `backup_addrs`: List of backup coordinator addresses for replication
+- **StateSnapshot**: Serializable state container for SYNC message replication
+- **Dual Threading Architecture**: 
+  - `_client_server()`: Handles client traffic on port 50000
+  - `_coord_server()`: Handles coordinator traffic on port 50001
+- **Role-Based Message Processing**:
+  - PRIMARY: Processes REQ/REL/HB, sends SYNC to backups
+  - BACKUP: Applies SYNC updates, redirects clients with NACK
 
 #### GUI Wrapper (`coordinator_gui.py`)
 - **CoordinatorGUI Class**: Jupyter widgets interface wrapping core coordinator
@@ -193,13 +218,18 @@ No formal test framework is configured. Manual testing approach:
 - **Real-time Updates**: Separate thread for 10 FPS dashboard updates
 
 #### Critical Sections in Code
-1. **Message Processing Loop** (`_udp_server()` method):
-   - Handles REQ: Immediate grant or queue insertion
-   - Handles REL: Token transfer to next queued node
-   - Handles HB: Lease renewal for current holder
-   - Automatic grant sending on lease expiry
+1. **Client Message Processing Loop** (`_client_server()` method):
+   - PRIMARY: Handles REQ (immediate grant/queue), REL (token transfer), HB (lease renewal)
+   - BACKUP: Sends NACK redirect for all client messages
+   - Automatic grant sending on lease expiry (PRIMARY only)
+   - State synchronization to backups after each state change
 
-2. **Dashboard Update Loop** (`_update_dashboard()` method in GUI):
+2. **Coordinator Message Processing Loop** (`_coord_server()` method):
+   - BACKUP: Receives SYNC messages and applies state snapshots
+   - Sends SYNC_ACK acknowledgments to PRIMARY
+   - Future: Will handle ELECTION/OK/COORDINATOR messages for leader election
+
+3. **Dashboard Update Loop** (`_update_dashboard()` method in GUI):
    - Real-time widget state updates
    - Lease countdown calculations
    - Dynamic widget creation/management
