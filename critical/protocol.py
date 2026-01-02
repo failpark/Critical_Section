@@ -204,7 +204,10 @@ class ReliableSender:
 		
 		data = serialize(msg)
 		if not data:
+			print(f"DEBUG: Failed to serialize message {msg}")
 			return None
+		
+		print(f"DEBUG: Sending {msg.type} to {addr} with seq={msg.seq}")
 		
 		orig_timeout = sock.gettimeout()
 		sock.settimeout(timeout)
@@ -213,37 +216,50 @@ class ReliableSender:
 			for attempt in range(retries):
 				try:
 					sock.sendto(data, addr)
+					print(f"DEBUG: Attempt {attempt+1}, sent message")
 					
 					while True:
 						response_data, response_addr = sock.recvfrom(1024)
+						print(f"DEBUG: Received response from {response_addr}")
 						response = deserialize(response_data)
 						
 						if not response:
+							print(f"DEBUG: Failed to deserialize response")
 							continue
 						
+						print(f"DEBUG: Deserialized {response.type} with seq={response.seq}")
+						
 						if response_addr != addr:
+							print(f"DEBUG: Response from wrong address {response_addr} != {addr}")
 							continue
 						
 						sender_key = f"{response_addr[0]}:{response_addr[1]}"
 						
 						if sender_key in self.last_seen_seq:
 							if response.seq <= self.last_seen_seq[sender_key]:
+								print(f"DEBUG: Duplicate response seq={response.seq} <= {self.last_seen_seq[sender_key]}")
 								continue
 						
 						self.last_seen_seq[sender_key] = response.seq
 						
-						if isinstance(response, (ACK, NACK)) and response.seq == msg.seq:
+						if isinstance(response, (ACK, NACK, GRANT)) and response.seq == msg.seq:
+							print(f"DEBUG: Got matching {response.type} response")
 							return response
+						else:
+							print(f"DEBUG: Response doesn't match: type={type(response)}, seq={response.seq} vs {msg.seq}")
 							
 				except socket.timeout:
+					print(f"DEBUG: Timeout on attempt {attempt+1}")
 					if attempt == retries - 1:
 						break
 					continue
-				except Exception:
+				except Exception as e:
+					print(f"DEBUG: Exception in send_reliable: {e}")
 					break
 		finally:
 			sock.settimeout(orig_timeout)
 		
+		print(f"DEBUG: send_reliable returning None after all attempts")
 		return None
 
 if __name__ == "__main__":
