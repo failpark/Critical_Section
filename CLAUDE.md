@@ -21,18 +21,19 @@ This is a distributed critical section implementation using a centralized coordi
 ### Core Components
 
 1. **Coordinator System with PRIMARY/BACKUP Roles**: 
-   - **Core Logic** (`critical/coordinator.py`): Enhanced with PRIMARY/BACKUP role support and state replication
+   - **Core Logic** (`critical/coordinator.py`): Enhanced with PRIMARY/BACKUP role support and SYNC-based state replication
    - **GUI Interface** (`critical/coordinator_gui.py`): Jupyter widget-based dashboard wrapper  
    - **Notebook Interface** (`critical/coordinator.ipynb`): Interactive Jupyter notebook demo
    - **Role-Based Architecture**:
-     - PRIMARY: Processes client requests, maintains authoritative state, sends SYNC to backups
+     - PRIMARY: Processes client requests, maintains authoritative state, sends SYNC with majority consensus
      - BACKUP: Stores replicated state, redirects client requests with NACK, receives SYNC updates
    - **Dual Network Architecture**:
      - Port 50000: Client communication (REQ/REL/HB from nodes)
      - Port 50001: Inter-coordinator communication (SYNC/SYNC_ACK between coordinators)
-   - **State Management**: CoordinatorState dataclass with full replication support
+   - **State Management**: CoordinatorState dataclass with backup health tracking and sequence counters
    - **StateSnapshot**: Serializable state container with to_dict()/from_dict() methods
-   - Protocol-aware message handling with ACK/NACK responses
+   - **SYNC Consensus**: Majority-based replication with 1-second timeout and suspect backup marking
+   - Protocol-aware message handling with ACK/NACK responses and term validation
    - Duplicate detection using per-node sequence number tracking
    - Term-based consensus support for future leader election
    - Thread-safe implementation with `threading.Lock()` for state synchronization
@@ -86,10 +87,12 @@ JSON-serialized messages with structured fields:
 #### State Management
 - **current_holder**: Currently active node ID (None if no holder)
 - **lease_expiry**: Timestamp when current lease expires
-- **queue**: FIFO queue of (node_id, address) pairs awaiting access
+- **queue**: FIFO queue of (node_id, address, seq) tuples awaiting access
 - **known_nodes**: Set of all nodes that have ever contacted coordinator
 - **term**: Current consensus term for leader election compatibility
 - **last_seen_seq**: Dict mapping node_id to last processed sequence number
+- **backup_status**: Dict mapping backup addresses to "healthy"/"suspect" status
+- **sync_seq_counter**: Incrementing sequence number for SYNC messages
 
 ### Network Configuration & Technical Details
 
@@ -195,7 +198,7 @@ No formal test framework is configured. Manual testing approach:
 
 #### Core Coordinator (`coordinator.py`)
 - **Coordinator Class**: Reusable coordinator implementation with PRIMARY/BACKUP role support
-- **CoordinatorState**: Centralized state management with replication support
+- **CoordinatorState**: Centralized state management with SYNC-based replication
   - `term`: Current consensus term for distributed coordination
   - `role`: PRIMARY|BACKUP|CANDIDATE role designation
   - `current_holder`: String ID of token holder or `None`
@@ -204,13 +207,20 @@ No formal test framework is configured. Manual testing approach:
   - `known_nodes`: Set of all discovered node IDs for GUI management
   - `last_seen_seq`: Dict tracking per-node sequence numbers for deduplication
   - `backup_addrs`: List of backup coordinator addresses for replication
+  - `backup_status`: Dict tracking backup health ("healthy"/"suspect")
+  - `sync_seq_counter`: Incrementing counter for SYNC message sequencing
 - **StateSnapshot**: Serializable state container for SYNC message replication
 - **Dual Threading Architecture**: 
   - `_client_server()`: Handles client traffic on port 50000
   - `_coord_server()`: Handles coordinator traffic on port 50001
 - **Role-Based Message Processing**:
-  - PRIMARY: Processes REQ/REL/HB, sends SYNC to backups
-  - BACKUP: Applies SYNC updates, redirects clients with NACK
+  - PRIMARY: Processes REQ/REL/HB, sends SYNC with majority consensus to backups
+  - BACKUP: Applies SYNC updates with term validation, redirects clients with NACK
+- **SYNC Consensus Protocol**:
+  - After each state change, PRIMARY sends SYNC to all backups
+  - Waits for SYNC_ACK from majority within 1-second timeout
+  - Marks unresponsive backups as "suspect" but continues operation
+  - Returns ACK count for validation (availability over strict consistency)
 
 #### GUI Wrapper (`coordinator_gui.py`)
 - **CoordinatorGUI Class**: Jupyter widgets interface wrapping core coordinator

@@ -18,6 +18,8 @@ class CoordinatorState:
 	known_nodes: set = field(default_factory=set)
 	last_seen_seq: Dict[str, int] = field(default_factory=dict)
 	backup_addrs: List[Tuple[str, int]] = field(default_factory=list)
+	backup_status: Dict[str, str] = field(default_factory=dict)
+	sync_seq_counter: int = 0
 
 
 @dataclass
@@ -139,7 +141,9 @@ class Coordinator:
                 'queue_length': len(self.state.queue),
                 'known_nodes': set(self.state.known_nodes),
                 'running': self.running,
-                'role': self.state.role
+                'role': self.state.role,
+                'backup_status': self.state.backup_status.copy(),
+                'term': self.state.term
             }
     
     def _client_server(self):
@@ -163,9 +167,9 @@ class Coordinator:
                             next_id, next_addr, next_seq = self.state.queue.popleft()
                             self.state.current_holder = next_id
                             self.state.lease_expiry = time.time() + self.lease_duration
+                            ack_count = self._sync_to_backups()
                             grant_msg = GRANT(node_id=next_id, seq=next_seq, term=self.state.term, lease_duration=self.lease_duration)
                             self.client_sock.sendto(serialize(grant_msg), next_addr)
-                            self._sync_to_backups()
                 
                 try:
                     data, addr = self.client_sock.recvfrom(1024)
@@ -253,10 +257,16 @@ class Coordinator:
                 
                 with self.state_lock:
                     if isinstance(msg, SYNC):
-                        # Apply state update from primary
-                        self._apply_state_snapshot(msg.state_snapshot)
-                        ack_msg = SYNC_ACK(node_id=self.node_id, seq=msg.seq, term=self.state.term)
-                        self.coord_sock.sendto(serialize(ack_msg), addr)
+                        if msg.term < self.state.term:
+                            nack_msg = NACK(node_id=self.node_id, seq=msg.seq, term=self.state.term, msg_type="SYNC", reason="stale_term")
+                            self.coord_sock.sendto(serialize(nack_msg), addr)
+                            print(f"Rejected SYNC with stale term {msg.term} < {self.state.term}")
+                        else:
+                            self.state.term = max(self.state.term, msg.term)
+                            self._apply_state_snapshot(msg.state_snapshot)
+                            ack_msg = SYNC_ACK(node_id=self.node_id, seq=msg.seq, term=self.state.term)
+                            self.coord_sock.sendto(serialize(ack_msg), addr)
+                            print(f"Applied SYNC: holder={self.state.current_holder}, queue_len={len(self.state.queue)}, term={self.state.term}")
                         
             except Exception as e:
                 if self.running:
@@ -272,25 +282,28 @@ class Coordinator:
             # Grant immediately
             self.state.current_holder = node_id
             self.state.lease_expiry = time.time() + self.lease_duration
+            ack_count = self._sync_to_backups()
             grant_msg = GRANT(node_id=node_id, seq=seq, term=self.state.term, lease_duration=self.lease_duration)
             self.client_sock.sendto(serialize(grant_msg), addr)
-            self._sync_to_backups()
         elif self.state.current_holder == node_id:
             # Renew lease for same node
             self.state.lease_expiry = time.time() + self.lease_duration
+            ack_count = self._sync_to_backups()
             grant_msg = GRANT(node_id=node_id, seq=seq, term=self.state.term, lease_duration=self.lease_duration)
             self.client_sock.sendto(serialize(grant_msg), addr)
-            self._sync_to_backups()
         else:
             # Queue the request if not already queued
             if node_id not in [x[0] for x in self.state.queue]:
                 self.state.queue.append((node_id, addr, seq))
+        
+        ack_msg = ACK(node_id=self.node_id, seq=seq, term=self.state.term, msg_type="REQ")
+        self.client_sock.sendto(serialize(ack_msg), addr)
     
     def _handle_heartbeat(self, node_id):
         """Handle HB message - must be called within state_lock."""
         if node_id == self.state.current_holder:
             self.state.lease_expiry = time.time() + self.lease_duration
-            self._sync_to_backups()
+            ack_count = self._sync_to_backups()
     
     def _handle_release(self, node_id):
         """Handle REL message - must be called within state_lock."""
@@ -300,18 +313,21 @@ class Coordinator:
                 next_id, next_addr, next_seq = self.state.queue.popleft()
                 self.state.current_holder = next_id
                 self.state.lease_expiry = time.time() + self.lease_duration
+                ack_count = self._sync_to_backups()
                 grant_msg = GRANT(node_id=next_id, seq=next_seq, term=self.state.term, lease_duration=self.lease_duration)
                 self.client_sock.sendto(serialize(grant_msg), next_addr)
             else:
                 # No one waiting
                 self.state.current_holder = None
-            self._sync_to_backups()
+                ack_count = self._sync_to_backups()
     
-    def _sync_to_backups(self):
+    def _sync_to_backups(self) -> int:
         """Send state synchronization to backup coordinators - must be called within state_lock."""
         if not self.state.backup_addrs or self.state.role != 'PRIMARY':
-            return
+            return 0
             
+        self.state.sync_seq_counter += 1
+        
         snapshot = StateSnapshot(
             term=self.state.term,
             current_holder=self.state.current_holder,
@@ -321,14 +337,48 @@ class Coordinator:
             last_seen_seq=self.state.last_seen_seq.copy()
         )
         
-        sync_msg = SYNC(node_id=self.node_id, seq=0, term=self.state.term, state_snapshot=snapshot.to_dict())
+        sync_msg = SYNC(node_id=self.node_id, seq=self.state.sync_seq_counter, term=self.state.term, state_snapshot=snapshot.to_dict())
+        sync_data = serialize(sync_msg)
         
+        ack_count = 0
         for backup_addr in self.state.backup_addrs:
             try:
-                coord_addr = (backup_addr[0], backup_addr[1] + 1)  # coord_port = client_port + 1
-                self.coord_sock.sendto(serialize(sync_msg), coord_addr)
+                coord_addr = (backup_addr[0], backup_addr[1] + 1)
+                backup_key = f"{backup_addr[0]}:{backup_addr[1]}"
+                
+                self.coord_sock.settimeout(1.0)
+                self.coord_sock.sendto(sync_data, coord_addr)
+                
+                try:
+                    response_data, response_addr = self.coord_sock.recvfrom(1024)
+                    response = deserialize(response_data)
+                    
+                    if (isinstance(response, SYNC_ACK) and 
+                        response.seq == self.state.sync_seq_counter and 
+                        response_addr[0] == backup_addr[0]):
+                        ack_count += 1
+                        self.state.backup_status[backup_key] = "healthy"
+                        print(f"SYNC_ACK received from backup {backup_addr}")
+                    else:
+                        self.state.backup_status[backup_key] = "suspect"
+                        print(f"Invalid SYNC_ACK from backup {backup_addr}")
+                        
+                except socket.timeout:
+                    self.state.backup_status[backup_key] = "suspect"
+                    print(f"SYNC timeout for backup {backup_addr}")
+                    
             except Exception as e:
+                backup_key = f"{backup_addr[0]}:{backup_addr[1]}"
+                self.state.backup_status[backup_key] = "suspect"
                 print(f"Failed to sync to backup {backup_addr}: {e}")
+        
+        self.coord_sock.settimeout(None)
+        
+        majority_needed = (len(self.state.backup_addrs) + 1) // 2
+        if ack_count < majority_needed:
+            print(f"WARNING: SYNC majority not reached ({ack_count}/{len(self.state.backup_addrs)}, need {majority_needed})")
+        
+        return ack_count
     
     def _apply_state_snapshot(self, snapshot_dict: Dict[str, Any]):
         """Apply state snapshot from primary - must be called within state_lock."""
