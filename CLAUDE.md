@@ -6,6 +6,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a distributed critical section implementation using a centralized coordinator approach with lease-based mutual exclusion. The system demonstrates token-based access control in distributed systems where multiple nodes request exclusive access to a critical section through a single coordinator.
 
+## Coding Standards
+
+- **Style**: snake_case for all identifiers
+- **Indentation**: Tabs (not spaces)
+- **Comments**: None. Code must be self-explanatory through naming and structure
+- **Typing**: Use Python type hints throughout (from typing import ...)
+- **Conciseness**: Prefer compact, readable implementations
+- **Updates**: After each change, update this CLAUDE.md file to reflect new state
+- **Commands**: User runs external commands (e.g., `cd critical && python3 coordinator.py`)
+
 ## Architecture
 
 ### Core Components
