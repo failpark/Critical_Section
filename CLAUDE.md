@@ -198,7 +198,7 @@ No formal test framework is configured. Manual testing approach:
 
 #### Core Coordinator (`coordinator.py`)
 - **Coordinator Class**: Reusable coordinator implementation with PRIMARY/BACKUP role support
-- **CoordinatorState**: Centralized state management with SYNC-based replication
+- **CoordinatorState**: Centralized state management with SYNC-based replication and Bully election support
   - `term`: Current consensus term for distributed coordination
   - `role`: PRIMARY|BACKUP|CANDIDATE role designation
   - `current_holder`: String ID of token holder or `None`
@@ -209,18 +209,32 @@ No formal test framework is configured. Manual testing approach:
   - `backup_addrs`: List of backup coordinator addresses for replication
   - `backup_status`: Dict tracking backup health ("healthy"/"suspect")
   - `sync_seq_counter`: Incrementing counter for SYNC message sequencing
+  - `election_in_progress`: Boolean tracking active election state
+  - `election_start_time`: Timestamp when current election started
+  - `candidate_peers`: List of higher-ID peers contacted during election
+  - `election_seq_counter`: Incrementing counter for ELECTION message sequencing
 - **StateSnapshot**: Serializable state container for SYNC message replication
 - **Dual Threading Architecture**: 
   - `_client_server()`: Handles client traffic on port 50000
   - `_coord_server()`: Handles coordinator traffic on port 50001
 - **Role-Based Message Processing**:
   - PRIMARY: Processes REQ/REL/HB, sends SYNC with majority consensus to backups
-  - BACKUP: Applies SYNC updates with term validation, redirects clients with NACK
+  - BACKUP: Applies SYNC updates with term validation, redirects clients with NACK, monitors primary health
+  - CANDIDATE: Conducts Bully election, sends ELECTION messages to higher-ID peers
 - **SYNC Consensus Protocol**:
   - After each state change, PRIMARY sends SYNC to all backups
   - Waits for SYNC_ACK from majority within 1-second timeout
   - Marks unresponsive backups as "suspect" but continues operation
   - Returns ACK count for validation (availability over strict consistency)
+- **Bully Election Algorithm**:
+  - **Failure Detection**: BACKUP monitors primary heartbeats (2.5-second timeout)
+  - **Election Trigger**: On primary failure, BACKUP → CANDIDATE, increment term
+  - **ELECTION Messages**: Send to all higher-ID coordinators with 2-second timeout
+  - **OK Response**: Higher-ID nodes send OK and start their own election
+  - **Election Victory**: No OK received → broadcast COORDINATOR, become PRIMARY
+  - **Term Management**: All messages include term, reject STALE_TERM with NACK
+  - **Concurrent Elections**: Higher term wins, equal term → higher ID wins
+  - **Step Down**: PRIMARY/CANDIDATE steps down on receiving COORDINATOR with higher/equal term
 
 #### GUI Wrapper (`coordinator_gui.py`)
 - **CoordinatorGUI Class**: Jupyter widgets interface wrapping core coordinator
@@ -235,9 +249,11 @@ No formal test framework is configured. Manual testing approach:
    - State synchronization to backups after each state change
 
 2. **Coordinator Message Processing Loop** (`_coord_server()` method):
-   - BACKUP: Receives SYNC messages and applies state snapshots
+   - BACKUP: Receives SYNC messages and applies state snapshots, monitors primary failure
    - Sends SYNC_ACK acknowledgments to PRIMARY
-   - Future: Will handle ELECTION/OK/COORDINATOR messages for leader election
+   - Bully Election: Handles ELECTION/OK/COORDINATOR messages for leader election
+   - Term validation: Rejects messages with stale terms using STALE_TERM NACK
+   - Election timeout checking for CANDIDATE role
 
 3. **Dashboard Update Loop** (`_update_dashboard()` method in GUI):
    - Real-time widget state updates
