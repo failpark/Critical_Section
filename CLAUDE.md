@@ -192,12 +192,84 @@ pip install ipywidgets jupyter
 
 ### Testing Strategy
 
-No formal test framework is configured. Manual testing approach:
-- **Mutual Exclusion**: Run multiple nodes simultaneously, verify only one in critical section
-- **FIFO Ordering**: Check dashboard queue positions match request order
-- **Lease Expiry**: Let smart nodes hold tokens and observe automatic expiry after 5 seconds
-- **Heartbeat Functionality**: Verify smart nodes maintain leases longer than 5 seconds
-- **Network Resilience**: Test node disconnection/reconnection scenarios
+Comprehensive test infrastructure located in `critical/tests/`:
+
+#### Test Environment (`test_env.py`)
+- **ProcessManager**: Automated startup/cleanup of coordinators and nodes with proper CLI arguments
+- **NetworkConfig**: Configurable IP/port mapping for test isolation (PRIMARY:50000, BACKUP1:50002, BACKUP2:50004)
+- **MessageDropWrapper**: Socket wrapper with configurable drop rate for network fault simulation
+- **TimestampLogger**: Structured logging with ISO timestamps and event categorization
+- **Standard Cluster**: 1 PRIMARY + 2 BACKUP coordinators + 3 simple nodes for consistent test setup
+
+#### Test Scenarios (`scenarios.py`)
+Automated test suite with 4 core fault tolerance tests:
+
+1. **test_message_loss()**: 30% message drop rate tolerance
+   - Applies network packet loss simulation
+   - Verifies eventual consistency and system progress
+   - Validates minimum grant throughput under adverse conditions
+
+2. **test_coordinator_failover()**: PRIMARY coordinator failure recovery
+   - Kills PRIMARY coordinator during operation
+   - Verifies BACKUP promotion via Bully election algorithm  
+   - Validates queue preservation and state continuity
+
+3. **test_split_brain()**: Network partition and recovery
+   - Simulates network partition by killing backup coordinator
+   - Verifies STEP_DOWN behavior and term validation
+   - Tests partition recovery and split-brain prevention
+
+4. **test_client_failure()**: Client holding critical section fails
+   - Kills node currently holding critical section token
+   - Verifies lease expiration mechanism (5-second timeout)
+   - Validates automatic grant to next queued node
+
+#### Performance Benchmarking (`benchmark.py`)
+Quantitative analysis of system performance characteristics:
+
+- **baseline_throughput()**: Single coordinator grants/second measurement
+- **replication_overhead()**: Performance impact of PRIMARY+BACKUP replication
+- **election_timing()**: Coordinator failover latency measurement  
+- **ComparisonTable**: Tabulated results with overhead percentages and statistical analysis
+
+#### Interactive Demos (`demo.py`)
+Visual demonstrations with real-time system state display:
+
+- **happy_path_demo()**: Normal operation with nodes cycling through critical section
+- **failure_injection_demo()**: Coordinator failure with visual recovery process
+- **VisualDisplay**: Color-coded terminal output with node status and event logging
+- **interactive_demo()**: Command-line interface for running specific demo scenarios
+
+#### Manual Testing Commands
+```bash
+# Run full test suite
+python critical/tests/scenarios.py
+
+# Run individual tests
+python critical/tests/scenarios.py message_loss
+python critical/tests/scenarios.py coordinator_failover
+python critical/tests/scenarios.py split_brain
+python critical/tests/scenarios.py client_failure
+
+# Performance benchmarking
+python critical/tests/benchmark.py full
+python critical/tests/benchmark.py baseline
+python critical/tests/benchmark.py replication
+python critical/tests/benchmark.py election
+
+# Interactive demonstrations
+python critical/demo.py interactive
+python critical/demo.py happy
+python critical/demo.py failure
+```
+
+#### Testing Requirements Validation
+- **Mutual Exclusion**: Automated verification via grant tracking and concurrency detection
+- **FIFO Ordering**: Queue position monitoring and order validation
+- **Lease Expiry**: Precise timing measurements with 5-second lease enforcement
+- **Heartbeat Functionality**: Smart node lease extension validation
+- **Network Resilience**: Fault injection with configurable failure scenarios
+- **Election Correctness**: Term validation, vote counting, and leadership transition timing
 
 ## Technical Implementation Details
 
