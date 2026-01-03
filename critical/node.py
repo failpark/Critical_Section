@@ -2,7 +2,7 @@ import socket
 import time
 import random
 from typing import Optional
-from protocol import REQ, GRANT, REL, HB, ACK, NACK, COORDINATOR, ReliableSender, serialize, deserialize, Message
+from protocol import REQ, GRANT, REL, HB, ACK, NACK, COORDINATOR, STEP_DOWN, ReliableSender, serialize, deserialize, Message
 
 COORD_IP = '127.0.0.1'
 PORT = 50000
@@ -98,6 +98,11 @@ def run_smart_node():
 					print(f"[{my_id}] HB NACK erhalten: {hb_response.reason}")
 				elif hb_response is None:
 					print(f"[{my_id}] HB failed - coordinator may be down")
+					# Check for coordinator updates during failed heartbeat
+					new_coord_addr = check_for_coordinator_updates(sock, my_id)
+					if new_coord_addr:
+						coord_addr = new_coord_addr
+						print(f"[{my_id}] Updated coordinator to {coord_addr} during heartbeat")
 					
 				next_heartbeat = time.time() + 2.0
 		
@@ -114,6 +119,31 @@ def run_smart_node():
 			print(f"[{my_id}] REL failed - coordinator may be down")
 
 
+def check_for_coordinator_updates(sock: socket.socket, node_id: str) -> Optional[tuple]:
+	"""Check for immediate COORDINATOR or STEP_DOWN messages without blocking."""
+	original_timeout = sock.gettimeout()
+	sock.settimeout(0.1)  # Very short timeout for non-blocking check
+	
+	try:
+		data, addr = sock.recvfrom(1024)
+		msg = deserialize(data)
+		
+		if isinstance(msg, COORDINATOR):
+			print(f"[{node_id}] Updated coordinator: {msg.coord_addr}")
+			return msg.coord_addr
+		elif isinstance(msg, STEP_DOWN):
+			print(f"[{node_id}] Coordinator {msg.node_id} stepped down")
+			return None  # Will trigger coordinator wait
+			
+	except socket.timeout:
+		pass  # No immediate messages
+	except Exception as e:
+		print(f"[{node_id}] Error checking coordinator updates: {e}")
+	finally:
+		sock.settimeout(original_timeout)
+	
+	return None
+
 def wait_for_coordinator(sock: socket.socket, node_id: str) -> Optional[tuple]:
 	"""Wait for COORDINATOR broadcast message and return new coordinator address."""
 	sock.settimeout(1.0)
@@ -125,6 +155,8 @@ def wait_for_coordinator(sock: socket.socket, node_id: str) -> Optional[tuple]:
 		if isinstance(msg, COORDINATOR):
 			print(f"[{node_id}] Received COORDINATOR broadcast: {msg.coord_addr}")
 			return msg.coord_addr
+		elif isinstance(msg, STEP_DOWN):
+			print(f"[{node_id}] Received STEP_DOWN from {msg.node_id}, continuing to wait")
 			
 	except socket.timeout:
 		pass

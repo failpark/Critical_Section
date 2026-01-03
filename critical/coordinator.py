@@ -5,7 +5,7 @@ import argparse
 from collections import deque
 from typing import Optional, Dict, List, Tuple, Any
 from dataclasses import dataclass, field
-from protocol import REQ, GRANT, REL, HB, ACK, NACK, SYNC, SYNC_ACK, COORD_HB, COORD_HB_ACK, COORDINATOR, ELECTION, OK, serialize, deserialize, Message
+from protocol import REQ, GRANT, REL, HB, ACK, NACK, SYNC, SYNC_ACK, COORD_HB, COORD_HB_ACK, COORDINATOR, ELECTION, OK, STEP_DOWN, serialize, deserialize, Message
 
 
 @dataclass
@@ -27,6 +27,10 @@ class CoordinatorState:
 	election_start_time: float = 0.0
 	candidate_peers: List[str] = field(default_factory=list)
 	election_seq_counter: int = 0
+	pending_requests: deque = field(default_factory=deque)
+	quorum_ack_count: int = 0
+	last_quorum_check: float = 0.0
+	quorum_lost_start: Optional[float] = None
 
 
 @dataclass
@@ -227,6 +231,19 @@ class Coordinator:
                             self._handle_release(msg.node_id)
                             ack_msg = ACK(node_id=self.node_id, seq=msg.seq, term=self.state.term, msg_type="REL")
                             self.client_sock.sendto(serialize(ack_msg), addr)
+                    elif self.state.role == 'CANDIDATE':
+                        # Election freeze: buffer REQ messages, allow HB/REL
+                        if isinstance(msg, REQ):
+                            self.state.pending_requests.append((msg.node_id, addr, msg.seq, msg.term))
+                            ack_msg = ACK(node_id=self.node_id, seq=msg.seq, term=self.state.term, msg_type="REQ")
+                            self.client_sock.sendto(serialize(ack_msg), addr)
+                            print(f"Buffered REQ from {msg.node_id} during election")
+                        elif isinstance(msg, HB):
+                            ack_msg = ACK(node_id=self.node_id, seq=msg.seq, term=self.state.term, msg_type="HB")
+                            self.client_sock.sendto(serialize(ack_msg), addr)
+                        elif isinstance(msg, REL):
+                            ack_msg = ACK(node_id=self.node_id, seq=msg.seq, term=self.state.term, msg_type="REL")
+                            self.client_sock.sendto(serialize(ack_msg), addr)
                     else:  # BACKUP
                         # Send NACK redirect for all client messages
                         primary_addr = ('192.168.1.101', 50000)  # Default primary address
@@ -325,9 +342,24 @@ class Coordinator:
                             self.state.election_in_progress = False
                             self.state.primary_suspected_failed = False
                             self.state.last_primary_hb = time.time()
+                            
+                            # Discard pending requests when becoming BACKUP
+                            if self.state.pending_requests:
+                                discarded_count = len(self.state.pending_requests)
+                                self.state.pending_requests.clear()
+                                print(f"Discarded {discarded_count} pending requests, new primary will handle")
+                            
                             print(f"New coordinator: {msg.coord_id} at {msg.coord_addr}")
                         else:
                             print(f"Rejected COORDINATOR with stale term {msg.term} < {self.state.term}")
+                    
+                    elif isinstance(msg, STEP_DOWN):
+                        print(f"Received STEP_DOWN from {msg.node_id}, term={msg.term}")
+                        # Primary stepped down, trigger election if we are BACKUP
+                        if self.state.role == 'BACKUP' and msg.term >= self.state.term:
+                            if not self.state.election_in_progress:
+                                print("Primary stepped down, starting election")
+                                self._start_election()
                         
             except Exception as e:
                 if self.running:
@@ -467,6 +499,8 @@ class Coordinator:
                     continue
                     
                 self.state.heartbeat_seq_counter += 1
+                self.state.quorum_ack_count = 0  # Reset counter for this heartbeat round
+                self.state.last_quorum_check = time.time()
                 hb_msg = COORD_HB(node_id=self.node_id, seq=self.state.heartbeat_seq_counter, term=self.state.term)
                 hb_data = serialize(hb_msg)
                 
@@ -489,6 +523,7 @@ class Coordinator:
                                 response.seq == self.state.heartbeat_seq_counter and 
                                 response_addr[0] == backup_addr[0]):
                                 self.state.backup_status[backup_key] = "healthy"
+                                self.state.quorum_ack_count += 1
                             else:
                                 self.state.backup_status[backup_key] = "suspect"
                                 
@@ -500,8 +535,66 @@ class Coordinator:
                         self.state.backup_status[backup_key] = "suspect"
                         
                 self.coord_sock.settimeout(None)
+                
+                # Check quorum after heartbeat round (including self)
+                total_coordinators = len(self.state.backup_addrs) + 1
+                majority_needed = (total_coordinators + 1) // 2
+                quorum_achieved = (self.state.quorum_ack_count + 1) >= majority_needed  # +1 for self
+                
+                if not quorum_achieved:
+                    current_time = time.time()
+                    if self.state.quorum_lost_start is None:
+                        self.state.quorum_lost_start = current_time
+                        print(f"Quorum lost: {self.state.quorum_ack_count + 1}/{total_coordinators} (need {majority_needed})")
+                    elif current_time - self.state.quorum_lost_start > 3.0:
+                        print(f"Quorum lost for 3+ seconds, stepping down")
+                        self._step_down()
+                        break
+                else:
+                    if self.state.quorum_lost_start is not None:
+                        print("Quorum restored")
+                    self.state.quorum_lost_start = None
         
         print("Heartbeat sender thread beendet")
+
+    def _step_down(self):
+        """Step down from PRIMARY role and broadcast STEP_DOWN - must be called within state_lock."""
+        if self.state.role != 'PRIMARY':
+            return
+            
+        print(f"Stepping down from PRIMARY role, term={self.state.term}")
+        
+        # Broadcast STEP_DOWN message
+        step_down_msg = STEP_DOWN(node_id=self.node_id, seq=self.state.heartbeat_seq_counter + 1, term=self.state.term)
+        step_down_data = serialize(step_down_msg)
+        
+        if step_down_data:
+            try:
+                broadcast_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                broadcast_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+                
+                # Broadcast to all coordinators and nodes
+                for peer_addr in self.state.backup_addrs:
+                    coord_addr = (peer_addr[0], peer_addr[1] + 1)
+                    broadcast_sock.sendto(step_down_data, coord_addr)
+                
+                broadcast_sock.sendto(step_down_data, ('255.255.255.255', self.client_port))
+                broadcast_sock.sendto(step_down_data, ('127.0.0.1', self.client_port))
+                broadcast_sock.close()
+                print("Broadcast STEP_DOWN message")
+                
+            except Exception as e:
+                print(f"Failed to broadcast STEP_DOWN: {e}")
+        
+        # Transition to BACKUP role
+        self.state.role = 'BACKUP'
+        self.state.quorum_lost_start = None
+        
+        # Clear pending requests
+        if self.state.pending_requests:
+            discarded_count = len(self.state.pending_requests)
+            self.state.pending_requests.clear()
+            print(f"Discarded {discarded_count} pending requests during step-down")
 
     def _validate_term(self, msg: Message, addr: Tuple[str, int], sock: socket.socket) -> bool:
         """Validate message term and handle term updates - must be called within state_lock."""
@@ -572,9 +665,7 @@ class Coordinator:
         
         if not higher_peers:
             print(f"No higher peers found, becoming PRIMARY, term={self.state.term}")
-            self.state.role = 'PRIMARY'
-            self.state.election_in_progress = False
-            self._broadcast_coordinator_announcement()
+            self._become_primary()
             return
         
         election_msg = ELECTION(
@@ -604,9 +695,42 @@ class Coordinator:
         current_time = time.time()
         if current_time - self.state.election_start_time > 2.0:
             print(f"Election timeout - became PRIMARY, term={self.state.term}")
-            self.state.role = 'PRIMARY'
-            self.state.election_in_progress = False
-            self._broadcast_coordinator_announcement()
+            self._become_primary()
+
+    def _become_primary(self):
+        """Transition to PRIMARY role with state takeover and pending request processing - must be called within state_lock."""
+        self.state.role = 'PRIMARY'
+        self.state.election_in_progress = False
+        
+        # Check for expired leases and auto-grant to queue head
+        current_time = time.time()
+        if self.state.current_holder and current_time > self.state.lease_expiry:
+            print(f"Clearing expired lease for {self.state.current_holder}")
+            self.state.current_holder = None
+            if self.state.queue:
+                next_id, next_addr, next_seq = self.state.queue.popleft()
+                self.state.current_holder = next_id
+                self.state.lease_expiry = current_time + self.lease_duration
+                grant_msg = GRANT(node_id=next_id, seq=next_seq, term=self.state.term, lease_duration=self.lease_duration)
+                self.client_sock.sendto(serialize(grant_msg), next_addr)
+                print(f"Auto-granted to {next_id} from queue after takeover")
+        
+        # Process pending requests in FIFO order
+        while self.state.pending_requests:
+            pending_node_id, pending_addr, pending_seq, pending_term = self.state.pending_requests.popleft()
+            # Only process if term is still valid
+            if pending_term <= self.state.term:
+                self._handle_request(pending_node_id, pending_addr, pending_seq)
+                print(f"Processed pending REQ from {pending_node_id}")
+            else:
+                print(f"Discarded stale pending REQ from {pending_node_id} (term {pending_term} > {self.state.term})")
+        
+        self._broadcast_coordinator_announcement()
+        
+        # Start heartbeat thread if we have backup coordinators
+        if self.state.backup_addrs and not self.heartbeat_thread:
+            self.heartbeat_thread = threading.Thread(target=self._heartbeat_sender, daemon=True)
+            self.heartbeat_thread.start()
 
     def _broadcast_coordinator_announcement(self):
         """Broadcast COORDINATOR message after winning election - must be called within state_lock."""

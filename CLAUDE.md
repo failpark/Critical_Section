@@ -27,15 +27,19 @@ This is a distributed critical section implementation using a centralized coordi
    - **Role-Based Architecture**:
      - PRIMARY: Processes client requests, maintains authoritative state, sends SYNC with majority consensus
      - BACKUP: Stores replicated state, redirects client requests with NACK, receives SYNC updates
+     - CANDIDATE: Conducts election, buffers REQ messages, processes pending after becoming PRIMARY
    - **Dual Network Architecture**:
      - Port 50000: Client communication (REQ/REL/HB from nodes)
      - Port 50001: Inter-coordinator communication (SYNC/SYNC_ACK between coordinators)
    - **State Management**: CoordinatorState dataclass with backup health tracking and sequence counters
    - **StateSnapshot**: Serializable state container with to_dict()/from_dict() methods
    - **SYNC Consensus**: Majority-based replication with 1-second timeout and suspect backup marking
+   - **Failover Handling**: Election freeze, pending request buffering, state takeover, active lease continuation
+   - **Quorum Tracking**: Majority-based PRIMARY validity with automatic step-down on quorum loss
+   - **Split-Brain Prevention**: Term validation, STEP_DOWN broadcasts, partition recovery
    - Protocol-aware message handling with ACK/NACK responses and term validation
    - Duplicate detection using per-node sequence number tracking
-   - Term-based consensus support for future leader election
+   - Term-based consensus support for Bully leader election
    - Thread-safe implementation with `threading.Lock()` for state synchronization
    - CLI arguments: --role primary|backup --id <int> --peers <ip:port,ip:port>
 
@@ -57,6 +61,9 @@ This is a distributed critical section implementation using a centralized coordi
    - Term tracking for distributed consensus compatibility
    - ReliableSender integration for message delivery guarantees
    - Complete protocol state machine: IDLE → REQ+ACK → GRANT → HB+ACK → REL+ACK
+   - **Failover Support**: Coordinator failure detection, COORDINATOR/STEP_DOWN message handling
+   - **Active Lease Continuation**: Continue work during coordinator transitions
+   - **Dynamic Coordinator Updates**: Update coordinator address from broadcasts during operation
    - Configured for coordinator IP `192.168.1.101`
 
 4. **Simple Node Instances** (`critical/nodes/node1.py` through `node5.py`):
@@ -213,28 +220,36 @@ No formal test framework is configured. Manual testing approach:
   - `election_start_time`: Timestamp when current election started
   - `candidate_peers`: List of higher-ID peers contacted during election
   - `election_seq_counter`: Incrementing counter for ELECTION message sequencing
+  - `pending_requests`: Deque buffering REQ messages during CANDIDATE state for FIFO processing
+  - `quorum_ack_count`: Count of COORD_HB_ACK responses in current heartbeat round
+  - `last_quorum_check`: Timestamp of last quorum check for PRIMARY validity
+  - `quorum_lost_start`: Timestamp when quorum was first lost (None if quorum healthy)
 - **StateSnapshot**: Serializable state container for SYNC message replication
 - **Dual Threading Architecture**: 
   - `_client_server()`: Handles client traffic on port 50000
   - `_coord_server()`: Handles coordinator traffic on port 50001
 - **Role-Based Message Processing**:
-  - PRIMARY: Processes REQ/REL/HB, sends SYNC with majority consensus to backups
+  - PRIMARY: Processes REQ/REL/HB, sends SYNC with majority consensus, tracks quorum health
   - BACKUP: Applies SYNC updates with term validation, redirects clients with NACK, monitors primary health
-  - CANDIDATE: Conducts Bully election, sends ELECTION messages to higher-ID peers
+  - CANDIDATE: Buffers REQ messages, allows HB/REL, conducts Bully election with higher-ID peers
 - **SYNC Consensus Protocol**:
   - After each state change, PRIMARY sends SYNC to all backups
   - Waits for SYNC_ACK from majority within 1-second timeout
   - Marks unresponsive backups as "suspect" but continues operation
   - Returns ACK count for validation (availability over strict consistency)
-- **Bully Election Algorithm**:
-  - **Failure Detection**: BACKUP monitors primary heartbeats (2.5-second timeout)
+- **Bully Election Algorithm with Failover**:
+  - **Failure Detection**: BACKUP monitors primary heartbeats (2.5-second timeout) or receives STEP_DOWN
   - **Election Trigger**: On primary failure, BACKUP → CANDIDATE, increment term
+  - **Election Freeze**: CANDIDATE buffers incoming REQ messages, allows HB/REL to continue
   - **ELECTION Messages**: Send to all higher-ID coordinators with 2-second timeout
   - **OK Response**: Higher-ID nodes send OK and start their own election
-  - **Election Victory**: No OK received → broadcast COORDINATOR, become PRIMARY
+  - **Election Victory**: No OK received → become PRIMARY via `_become_primary()`
+  - **State Takeover**: New PRIMARY checks expired leases, processes pending REQs in FIFO order
+  - **Active Lease Continuation**: Nodes continue working, update coordinator from COORDINATOR broadcasts
   - **Term Management**: All messages include term, reject STALE_TERM with NACK
   - **Concurrent Elections**: Higher term wins, equal term → higher ID wins
-  - **Step Down**: PRIMARY/CANDIDATE steps down on receiving COORDINATOR with higher/equal term
+  - **Quorum Monitoring**: PRIMARY tracks majority COORD_HB_ACK responses, steps down if quorum lost 3+ seconds
+  - **Split-Brain Prevention**: STEP_DOWN broadcasts, partition recovery via higher-term COORDINATOR messages
 
 #### GUI Wrapper (`coordinator_gui.py`)
 - **CoordinatorGUI Class**: Jupyter widgets interface wrapping core coordinator
