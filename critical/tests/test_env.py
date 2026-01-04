@@ -65,12 +65,12 @@ class ProcessManager:
 		self.processes.append(info)
 		return info
 	
-	def start_node(self, node_script: str) -> ProcessInfo:
-		cmd = ['uv', 'run', f'critical/nodes/{node_script}']
-		
+	def start_node(self, node_id: str) -> ProcessInfo:
+		cmd = ['uv', 'run', 'critical/node.py', '--id', node_id]
+
 		env = os.environ.copy()
 		env['PYTHONPATH'] = '/Users/phedias/code/sem3/algo_dist_sys/Critical_Section'
-		
+
 		process = subprocess.Popen(
 			cmd,
 			cwd='/Users/phedias/code/sem3/algo_dist_sys/Critical_Section',
@@ -79,40 +79,16 @@ class ProcessManager:
 			stderr=subprocess.PIPE,
 			text=True
 		)
-		
-		node_name = node_script.replace('.py', '')
+
 		info = ProcessInfo(
 			process=process,
 			role='CLIENT',
-			node_id=node_name,
+			node_id=node_id,
 			address=('127.0.0.1', 0)
 		)
 		self.processes.append(info)
 		return info
 	
-	def start_smart_node(self) -> ProcessInfo:
-		cmd = ['uv', 'run', 'critical/node.py']
-		
-		env = os.environ.copy()
-		env['PYTHONPATH'] = '/Users/phedias/code/sem3/algo_dist_sys/Critical_Section'
-		
-		process = subprocess.Popen(
-			cmd,
-			cwd='/Users/phedias/code/sem3/algo_dist_sys/Critical_Section',
-			env=env,
-			stdout=subprocess.PIPE,
-			stderr=subprocess.PIPE,
-			text=True
-		)
-		
-		info = ProcessInfo(
-			process=process,
-			role='SMART_CLIENT',
-			node_id='smart_node',
-			address=('127.0.0.1', 0)
-		)
-		self.processes.append(info)
-		return info
 	
 	def kill_process(self, process_info: ProcessInfo) -> bool:
 		try:
@@ -248,13 +224,13 @@ def standard_cluster_startup(manager: ProcessManager, logger: TimestampLogger) -
 	
 	time.sleep(2)
 	
-	processes['node1'] = manager.start_node('node1.py')
+	processes['node1'] = manager.start_node('Node_1')
 	logger.log_process_event('STARTED', processes['node1'])
-	
-	processes['node2'] = manager.start_node('node2.py')
+
+	processes['node2'] = manager.start_node('Node_2')
 	logger.log_process_event('STARTED', processes['node2'])
-	
-	processes['node3'] = manager.start_node('node3.py')
+
+	processes['node3'] = manager.start_node('Node_3')
 	logger.log_process_event('STARTED', processes['node3'])
 	
 	logger.log_event('SETUP', "Waiting for cluster startup...")

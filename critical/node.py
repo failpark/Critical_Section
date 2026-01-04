@@ -1,6 +1,7 @@
 import socket
 import time
 import random
+import argparse
 from typing import Optional
 from protocol import REQ, GRANT, REL, HB, ACK, NACK, COORDINATOR, STEP_DOWN, ReliableSender, serialize, deserialize, Message
 
@@ -9,17 +10,17 @@ PORT = 50000
 STATE_NORMAL = 'NORMAL'
 STATE_WAITING_FOR_COORDINATOR = 'WAITING_FOR_COORDINATOR'
 
-def run_smart_node():
+def run_smart_node(node_id: Optional[str] = None):
 	sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 	sock.settimeout(2.0)
-	
-	my_id = f"Node_{random.randint(10, 99)}"
+
+	my_id = node_id if node_id else f"Node_{random.randint(10, 99)}"
 	term = 0
 	reliable_sender = ReliableSender()
 	node_state = STATE_NORMAL
 	coord_addr = (COORD_IP, PORT)
 	
-	print(f"--- Node {my_id} gestartet ---")
+	print(f"--- Node {my_id} started ---")
 	
 	while True:
 		if node_state == STATE_WAITING_FOR_COORDINATOR:
@@ -32,7 +33,7 @@ def run_smart_node():
 				time.sleep(1)
 				continue
 		
-		print(f"[{my_id}] Arbeite lokal (kein Zugriff auf Critical Section nötig)...")
+		print(f"[{my_id}] Working locally (no critical section access needed)...")
 		time.sleep(random.uniform(2, 4))
 		
 		granted = False
@@ -40,13 +41,13 @@ def run_smart_node():
 		max_retries = 3
 		
 		while not granted and retry_count < max_retries:
-			print(f"[{my_id}] Fordere Token an (REQ)...")
+			print(f"[{my_id}] Requesting token (REQ)...")
 			req_msg = REQ(node_id=my_id, seq=0, term=term)
 			
 			grant_response = reliable_sender.send_reliable(sock, req_msg, coord_addr)
 			if grant_response is None:
 				retry_count += 1
-				print(f"[{my_id}] Keine Antwort erhalten, Versuch {retry_count}/{max_retries}")
+				print(f"[{my_id}] No response received, attempt {retry_count}/{max_retries}")
 				if retry_count >= max_retries:
 					print(f"[{my_id}] Coordinator failure detected after {max_retries} failed attempts")
 					node_state = STATE_WAITING_FOR_COORDINATOR
@@ -65,19 +66,19 @@ def run_smart_node():
 						print(f"[{my_id}] Redirected to coordinator at {coord_addr}")
 					continue
 				else:
-					print(f"[{my_id}] NACK erhalten: {grant_response.reason}, versuche erneut...")
+					print(f"[{my_id}] NACK received: {grant_response.reason}, retrying...")
 					time.sleep(1)
 					continue
 				
 			if isinstance(grant_response, GRANT):
-				print(f"[{my_id}] GRANT erhalten mit lease_duration={grant_response.lease_duration}")
+				print(f"[{my_id}] GRANT received with lease_duration={grant_response.lease_duration}")
 				term = max(term, grant_response.term)
 				granted = True
 		
 		if not granted and node_state == STATE_WAITING_FOR_COORDINATOR:
 			continue
 		
-		print(f"[{my_id}] >>> BETRITT CRITICAL SECTION <<<")
+		print(f"[{my_id}] >>> ENTERING CRITICAL SECTION <<<")
 		
 		work_duration = random.randint(3, 12)
 		start_time = time.time()
@@ -87,15 +88,15 @@ def run_smart_node():
 			time.sleep(0.5)
 			
 			if time.time() > next_heartbeat:
-				print(f"[{my_id}] Sende Heartbeat (HB)...")
+				print(f"[{my_id}] Sending heartbeat (HB)...")
 				hb_msg = HB(node_id=my_id, seq=0, term=term)
 				
 				hb_response = reliable_sender.send_reliable(sock, hb_msg, coord_addr)
 				if hb_response and isinstance(hb_response, ACK) and hb_response.msg_type == "HB":
-					print(f"[{my_id}] HB ACK erhalten")
+					print(f"[{my_id}] HB ACK received")
 					term = max(term, hb_response.term)
 				elif hb_response and isinstance(hb_response, NACK):
-					print(f"[{my_id}] HB NACK erhalten: {hb_response.reason}")
+					print(f"[{my_id}] HB NACK received: {hb_response.reason}")
 				elif hb_response is None:
 					print(f"[{my_id}] HB failed - coordinator may be down")
 					# Check for coordinator updates during failed heartbeat
@@ -106,15 +107,15 @@ def run_smart_node():
 					
 				next_heartbeat = time.time() + 2.0
 		
-		print(f"[{my_id}] <<< VERLÄSST CRITICAL SECTION (REL) nach {work_duration}s")
+		print(f"[{my_id}] <<< LEAVING CRITICAL SECTION (REL) after {work_duration}s")
 		rel_msg = REL(node_id=my_id, seq=0, term=term)
 		
 		rel_response = reliable_sender.send_reliable(sock, rel_msg, coord_addr)
 		if rel_response and isinstance(rel_response, ACK) and rel_response.msg_type == "REL":
-			print(f"[{my_id}] REL ACK erhalten")
+			print(f"[{my_id}] REL ACK received")
 			term = max(term, rel_response.term)
 		elif rel_response and isinstance(rel_response, NACK):
-			print(f"[{my_id}] REL NACK erhalten: {rel_response.reason}")
+			print(f"[{my_id}] REL NACK received: {rel_response.reason}")
 		elif rel_response is None:
 			print(f"[{my_id}] REL failed - coordinator may be down")
 
@@ -170,4 +171,8 @@ def wait_for_coordinator(sock: socket.socket, node_id: str) -> Optional[tuple]:
 
 
 if __name__ == "__main__":
-    run_smart_node()
+    parser = argparse.ArgumentParser(description='Smart node for distributed critical section')
+    parser.add_argument('--id', type=str, help='Node identifier (e.g., Node_1)')
+    args = parser.parse_args()
+
+    run_smart_node(node_id=args.id)

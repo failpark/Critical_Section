@@ -117,15 +117,15 @@ class Coordinator:
             self.heartbeat_thread.start()
         
         print(f"running as {self.state.role}")
-        print(f"Client UDP Server läuft auf {self.client_port}")
-        print(f"Coordinator UDP Server läuft auf {self.coord_port}")
+        print(f"Client UDP Server running on {self.client_port}")
+        print(f"Coordinator UDP Server running on {self.coord_port}")
     
     def stop(self):
         """Stop the coordinator server."""
         if not self.running:
             return
             
-        print("Beende System...")
+        print("Shutting down system...")
         self.running = False
         
         # Send internal stop signals to wake up server threads
@@ -135,7 +135,7 @@ class Coordinator:
             temp_sock.sendto(b"INTERNAL_STOP Node_sys", ('127.0.0.1', self.coord_port))
             temp_sock.close()
         except Exception as e:
-            print(f"Konnte Wake-Up Packet nicht senden: {e}")
+            print(f"Failed to send wake-up packet: {e}")
         
         time.sleep(0.1)
         for sock in [self.client_sock, self.coord_sock]:
@@ -172,7 +172,7 @@ class Coordinator:
         try:
             self.client_sock.bind((self.host, self.client_port))
         except OSError:
-            print(f"FEHLER: Client Port {self.client_port} ist noch belegt! Bitte Kernel neustarten.")
+            print(f"ERROR: Client Port {self.client_port} still in use! Please restart kernel.")
             self.running = False
             return
         
@@ -197,7 +197,7 @@ class Coordinator:
                     break
                 
                 if data.startswith(b"INTERNAL_STOP"):
-                    print("Client Stop-Signal empfangen.")
+                    print("Client stop signal received.")
                     break
                 
                 msg = deserialize(data)
@@ -258,7 +258,7 @@ class Coordinator:
         
         if self.client_sock:
             self.client_sock.close()
-        print("Client Server Thread beendet.")
+        print("Client Server Thread ended.")
     
     def _coord_server(self):
         """Coordinator UDP server loop - handles SYNC/COORD_HB between coordinators."""
@@ -268,7 +268,7 @@ class Coordinator:
         try:
             self.coord_sock.bind((self.host, self.coord_port))
         except OSError:
-            print(f"FEHLER: Coordinator Port {self.coord_port} ist noch belegt! Bitte Kernel neustarten.")
+            print(f"ERROR: Coordinator Port {self.coord_port} still in use! Please restart kernel.")
             self.running = False
             return
         
@@ -291,7 +291,7 @@ class Coordinator:
                     break
                 
                 if data.startswith(b"INTERNAL_STOP"):
-                    print("Coordinator Stop-Signal empfangen.")
+                    print("Coordinator stop signal received.")
                     break
                 
                 msg = deserialize(data)
@@ -367,7 +367,7 @@ class Coordinator:
         
         if self.coord_sock:
             self.coord_sock.close()
-        print("Coordinator Server Thread beendet.")
+        print("Coordinator Server Thread ended.")
     
     def _handle_request(self, node_id, addr, seq):
         """Handle REQ message - must be called within state_lock."""
@@ -555,7 +555,7 @@ class Coordinator:
                         print("Quorum restored")
                     self.state.quorum_lost_start = None
         
-        print("Heartbeat sender thread beendet")
+        print("Heartbeat sender thread ended")
 
     def _step_down(self):
         """Step down from PRIMARY role and broadcast STEP_DOWN - must be called within state_lock."""
@@ -839,12 +839,12 @@ def main():
     try:
         coordinator.start()
         
-        print("Coordinator läuft. Drücke Ctrl+C zum Beenden.")
+        print("Coordinator running. Press Ctrl+C to stop.")
         while coordinator.running:
             time.sleep(1)
             
     except KeyboardInterrupt:
-        print("\nBeende Coordinator...")
+        print("\nStopping Coordinator...")
     finally:
         coordinator.stop()
 

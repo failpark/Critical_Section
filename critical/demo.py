@@ -139,7 +139,7 @@ class DemoMonitor:
 	def parse_process_output(self, proc_name: str, proc_info: ProcessInfo, line: str):
 		node_id = proc_info.node_id
 		
-		if 'REQ' in line and ('sending' in line.lower() or 'fordere' in line.lower()):
+		if 'REQ' in line and ('sending' in line.lower() or 'requesting' in line.lower()):
 			self.update_node_state(node_id, 'REQUESTING')
 		elif 'GRANT' in line or 'granted' in line.lower():
 			self.update_node_state(node_id, 'HOLDING')
@@ -170,9 +170,9 @@ def happy_path_demo():
 		processes['primary'] = manager.start_coordinator('primary', 100, 50000)
 		time.sleep(2)
 		
-		processes['node1'] = manager.start_node('node1.py')
-		processes['node2'] = manager.start_node('node2.py')
-		processes['node3'] = manager.start_node('node3.py')
+		processes['node1'] = manager.start_node('Node_1')
+		processes['node2'] = manager.start_node('Node_2')
+		processes['node3'] = manager.start_node('Node_3')
 		
 		time.sleep(3)
 		
