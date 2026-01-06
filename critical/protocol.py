@@ -3,8 +3,15 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Optional, Dict, Tuple
 import json
+import os
 import socket
 import time
+
+DEBUG = os.environ.get('DEBUG')
+
+def print_debug(msg: str):
+	if DEBUG:
+		print(msg)
 
 @dataclass
 class Message(ABC):
@@ -204,10 +211,10 @@ class ReliableSender:
 		
 		data = serialize(msg)
 		if not data:
-			print(f"DEBUG: Failed to serialize message {msg}")
+			print_debug(f"DEBUG: Failed to serialize message {msg}")
 			return None
-		
-		print(f"DEBUG: Sending {msg.type} to {addr} with seq={msg.seq}")
+
+		print_debug(f"DEBUG: Sending {msg.type} to {addr} with seq={msg.seq}")
 		
 		orig_timeout = sock.gettimeout()
 		sock.settimeout(timeout)
@@ -216,18 +223,18 @@ class ReliableSender:
 			for attempt in range(retries):
 				try:
 					sock.sendto(data, addr)
-					print(f"DEBUG: Attempt {attempt+1}, sent message")
-					
+					print_debug(f"DEBUG: Attempt {attempt+1}, sent message")
+
 					while True:
 						response_data, response_addr = sock.recvfrom(1024)
-						print(f"DEBUG: Received response from {response_addr}")
+						print_debug(f"DEBUG: Received response from {response_addr}")
 						response = deserialize(response_data)
-						
+
 						if not response:
-							print(f"DEBUG: Failed to deserialize response")
+							print_debug(f"DEBUG: Failed to deserialize response")
 							continue
-						
-						print(f"DEBUG: Deserialized {response.type} with seq={response.seq}")
+
+						print_debug(f"DEBUG: Deserialized {response.type} with seq={response.seq}")
 
 						# Resolve hostname to IP for comparison
 						try:
@@ -237,36 +244,36 @@ class ReliableSender:
 						expected_addr = (expected_ip, addr[1])
 
 						if response_addr != expected_addr:
-							print(f"DEBUG: Response from wrong address {response_addr} != {expected_addr}")
+							print_debug(f"DEBUG: Response from wrong address {response_addr} != {expected_addr}")
 							continue
 
 						sender_key = f"{response_addr[0]}:{response_addr[1]}"
-						
+
 						if sender_key in self.last_seen_seq:
 							if response.seq <= self.last_seen_seq[sender_key]:
-								print(f"DEBUG: Duplicate response seq={response.seq} <= {self.last_seen_seq[sender_key]}")
+								print_debug(f"DEBUG: Duplicate response seq={response.seq} <= {self.last_seen_seq[sender_key]}")
 								continue
-						
+
 						self.last_seen_seq[sender_key] = response.seq
-						
+
 						if isinstance(response, (ACK, NACK, GRANT)) and response.seq == msg.seq:
-							print(f"DEBUG: Got matching {response.type} response")
+							print_debug(f"DEBUG: Got matching {response.type} response")
 							return response
 						else:
-							print(f"DEBUG: Response doesn't match: type={type(response)}, seq={response.seq} vs {msg.seq}")
+							print_debug(f"DEBUG: Response doesn't match: type={type(response)}, seq={response.seq} vs {msg.seq}")
 							
 				except socket.timeout:
-					print(f"DEBUG: Timeout on attempt {attempt+1}")
+					print_debug(f"DEBUG: Timeout on attempt {attempt+1}")
 					if attempt == retries - 1:
 						break
 					continue
 				except Exception as e:
-					print(f"DEBUG: Exception in send_reliable: {e}")
+					print_debug(f"DEBUG: Exception in send_reliable: {e}")
 					break
 		finally:
 			sock.settimeout(orig_timeout)
-		
-		print(f"DEBUG: send_reliable returning None after all attempts")
+
+		print_debug(f"DEBUG: send_reliable returning None after all attempts")
 		return None
 
 if __name__ == "__main__":

@@ -9,6 +9,24 @@ from protocol import REQ, GRANT, REL, HB, ACK, NACK, COORDINATOR, STEP_DOWN, Rel
 STATE_NORMAL = 'NORMAL'
 STATE_WAITING_FOR_COORDINATOR = 'WAITING_FOR_COORDINATOR'
 
+# Backoff configuration
+INITIAL_BACKOFF = 1.0
+MAX_BACKOFF = 16.0
+BACKOFF_MULTIPLIER = 2.0
+JITTER_FACTOR = 0.25
+
+def calculate_backoff_delay(current_backoff: float) -> tuple[float, float]:
+	"""
+	Calculate actual delay with jitter and next backoff value.
+
+	Returns:
+		(delay_with_jitter, next_backoff_value)
+	"""
+	jitter = random.uniform(1 - JITTER_FACTOR, 1 + JITTER_FACTOR)
+	delay = current_backoff * jitter
+	next_backoff = min(current_backoff * BACKOFF_MULTIPLIER, MAX_BACKOFF)
+	return delay, next_backoff
+
 def run_smart_node(node_id: Optional[str] = None, coord_ip: str = '127.0.0.1', coord_port: int = 50000):
 	sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 	sock.settimeout(2.0)
@@ -18,6 +36,7 @@ def run_smart_node(node_id: Optional[str] = None, coord_ip: str = '127.0.0.1', c
 	reliable_sender = ReliableSender()
 	node_state = STATE_NORMAL
 	coord_addr = (coord_ip, coord_port)
+	backoff_delay = INITIAL_BACKOFF
 	
 	print(f"--- Node {my_id} started ---")
 	
@@ -28,6 +47,7 @@ def run_smart_node(node_id: Optional[str] = None, coord_ip: str = '127.0.0.1', c
 			if coord_addr:
 				node_state = STATE_NORMAL
 				print(f"[{my_id}] New coordinator found at {coord_addr}")
+				backoff_delay = INITIAL_BACKOFF
 			else:
 				time.sleep(1)
 				continue
@@ -51,7 +71,8 @@ def run_smart_node(node_id: Optional[str] = None, coord_ip: str = '127.0.0.1', c
 					print(f"[{my_id}] Coordinator failure detected after {max_retries} failed attempts")
 					node_state = STATE_WAITING_FOR_COORDINATOR
 					break
-				time.sleep(1)
+				delay, backoff_delay = calculate_backoff_delay(backoff_delay)
+				time.sleep(delay)
 				continue
 				
 			retry_count = 0
@@ -63,6 +84,7 @@ def run_smart_node(node_id: Optional[str] = None, coord_ip: str = '127.0.0.1', c
 						host, port = new_coord.split(":")
 						coord_addr = (host, int(port))
 						print(f"[{my_id}] Redirected to coordinator at {coord_addr}")
+					backoff_delay = INITIAL_BACKOFF
 					continue
 				else:
 					print(f"[{my_id}] NACK received: {grant_response.reason}, retrying...")
@@ -70,10 +92,20 @@ def run_smart_node(node_id: Optional[str] = None, coord_ip: str = '127.0.0.1', c
 					time.sleep(1)
 					continue
 				
-			if isinstance(grant_response, GRANT):
-				print(f"[{my_id}] GRANT received with lease_duration={grant_response.lease_duration}")
-				term = max(term, grant_response.term)
-				granted = True
+
+		# Handle ACK without GRANT (request buffered during election)
+		if isinstance(grant_response, ACK) and grant_response.msg_type == "REQ":
+			print(f"[{my_id}] REQ acknowledged but no GRANT - election may be in progress")
+			delay, backoff_delay = calculate_backoff_delay(backoff_delay)
+			print(f"[{my_id}] Backing off for {delay:.2f}s")
+			time.sleep(delay)
+			continue
+
+		if isinstance(grant_response, GRANT):
+			print(f"[{my_id}] GRANT received with lease_duration={grant_response.lease_duration}")
+			term = max(term, grant_response.term)
+			backoff_delay = INITIAL_BACKOFF
+			granted = True
 		
 		if not granted and node_state == STATE_WAITING_FOR_COORDINATOR:
 			continue
