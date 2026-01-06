@@ -52,7 +52,6 @@ def run_smart_node(node_id: Optional[str] = None, coord_ip: str = '127.0.0.1', c
 				time.sleep(1)
 				continue
 		
-		print(f"[{my_id}] Working locally (no critical section access needed)...")
 		time.sleep(random.uniform(2, 4))
 		
 		granted = False
@@ -92,28 +91,30 @@ def run_smart_node(node_id: Optional[str] = None, coord_ip: str = '127.0.0.1', c
 					time.sleep(1)
 					continue
 
+			# Handle ACK without GRANT (request queued)
+			if isinstance(grant_response, ACK) and grant_response.msg_type == "REQ":
+				print(f"[{my_id}] REQ acknowledged but no GRANT - request queued")
+				delay, backoff_delay = calculate_backoff_delay(backoff_delay)
+				time.sleep(delay)
+				continue
+
+			# Handle GRANT - exit loop immediately
+			if isinstance(grant_response, GRANT):
+				print(f"[{my_id}] GRANT received with lease_duration={grant_response.lease_duration}")
+				term = max(term, grant_response.term)
+				backoff_delay = INITIAL_BACKOFF
+				granted = True
+				break
+
+			# Fallback backoff for unexpected responses
 			delay, backoff_delay = calculate_backoff_delay(backoff_delay)
 			time.sleep(delay)
-			continue
 
-		# Handle ACK without GRANT (request buffered during election)
-		if isinstance(grant_response, ACK) and grant_response.msg_type == "REQ":
-			print(f"[{my_id}] REQ acknowledged but no GRANT - election may be in progress")
-			delay, backoff_delay = calculate_backoff_delay(backoff_delay)
-			print(f"[{my_id}] Backing off for {delay:.2f}s")
-			time.sleep(delay)
-			continue
-
-		if isinstance(grant_response, GRANT):
-			print(f"[{my_id}] GRANT received with lease_duration={grant_response.lease_duration}")
-			term = max(term, grant_response.term)
-			backoff_delay = INITIAL_BACKOFF
-			granted = True
-		
 		if not granted and node_state == STATE_WAITING_FOR_COORDINATOR:
 			continue
-		
-		print(f"[{my_id}] >>> ENTERING CRITICAL SECTION <<<")
+
+		if granted:
+			print(f"[{my_id}] >>> ENTERING CRITICAL SECTION <<<")
 		
 		work_duration = random.randint(3, 12)
 		start_time = time.time()

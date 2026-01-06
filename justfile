@@ -21,6 +21,10 @@ up:
 	{{compose}} up --build --force-recreate --remove-orphans
 
 [group('local')]
+down:
+	{{compose}} down
+
+[group('local')]
 watch-logs:
 	{{compose}} logs -f
 

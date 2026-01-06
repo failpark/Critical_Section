@@ -2,6 +2,7 @@ import socket
 import threading
 import time
 import argparse
+import os
 from collections import deque
 from typing import Optional, Dict, List, Tuple, Any
 from dataclasses import dataclass, field
@@ -25,6 +26,8 @@ class CoordinatorState:
 	heartbeat_seq_counter: int = 0
 	election_in_progress: bool = False
 	election_start_time: float = 0.0
+	awaiting_coordinator: bool = False
+	awaiting_coordinator_since: float = 0.0
 	candidate_peers: List[str] = field(default_factory=list)
 	election_seq_counter: int = 0
 	pending_requests: deque = field(default_factory=deque)
@@ -55,11 +58,17 @@ class StateSnapshot:
 	
 	@classmethod
 	def from_dict(cls, data: Dict[str, Any]) -> 'StateSnapshot':
+		# Convert queue_list entries: [node_id, [host, port], seq] -> (node_id, (host, port), seq)
+		# JSON deserialization converts tuples to lists
+		queue_list = [
+			(entry[0], tuple(entry[1]), entry[2])
+			for entry in data['queue_list']
+		]
 		return cls(
 			term=data['term'],
 			current_holder=data['current_holder'],
 			lease_expiry=data['lease_expiry'],
-			queue_list=data['queue_list'],
+			queue_list=queue_list,
 			known_nodes_list=data['known_nodes_list'],
 			last_seen_seq=data['last_seen_seq']
 		)
@@ -120,6 +129,25 @@ class Coordinator:
         print(f"running as {self.state.role}")
         print(f"Client UDP Server running on {self.client_port}")
         print(f"Coordinator UDP Server running on {self.coord_port}")
+
+    def _get_resolvable_hostname(self) -> str:
+        """Get a hostname that can be resolved by other containers."""
+        # Try HOSTNAME environment variable first
+        hostname = os.environ.get('HOSTNAME')
+        if hostname:
+            return hostname
+
+        # Derive from node_id (Docker Compose naming convention)
+        # 100 -> primary, 99 -> backup1, 98 -> backup2
+        if self.node_id == 100:
+            return 'primary'
+        elif self.node_id == 99:
+            return 'backup1'
+        elif self.node_id == 98:
+            return 'backup2'
+
+        # Fallback to socket.gethostname()
+        return socket.gethostname()
     
     def stop(self):
         """Stop the coordinator server."""
@@ -290,7 +318,15 @@ class Coordinator:
                 if self.state.role == 'CANDIDATE':
                     with self.state_lock:
                         self._check_election_timeout()
-                
+
+                # Check if awaiting COORDINATOR but it never arrived
+                if self.state.awaiting_coordinator:
+                    with self.state_lock:
+                        if time.time() - self.state.awaiting_coordinator_since > 3.0:
+                            print("COORDINATOR timeout - higher-ID node may have failed, restarting election")
+                            self.state.awaiting_coordinator = False
+                            self._start_election()
+
                 try:
                     data, addr = self.coord_sock.recvfrom(1024)
                 except socket.timeout:
@@ -339,7 +375,11 @@ class Coordinator:
                     
                     elif isinstance(msg, OK):
                         if self.state.role == 'CANDIDATE':
-                            print(f"Received OK from {msg.responder_id}, continuing to wait")
+                            self.state.role = 'BACKUP'
+                            self.state.election_in_progress = False
+                            self.state.awaiting_coordinator = True
+                            self.state.awaiting_coordinator_since = time.time()
+                            print(f"Received OK from {msg.responder_id}, stepping down to await COORDINATOR")
                     
                     elif isinstance(msg, COORDINATOR):
                         if msg.term >= self.state.term:
@@ -348,6 +388,7 @@ class Coordinator:
 
                             self.state.role = 'BACKUP'
                             self.state.election_in_progress = False
+                            self.state.awaiting_coordinator = False
                             self.state.primary_suspected_failed = False
                             self.state.last_primary_hb = time.time()
                             self.state.current_primary_addr = msg.coord_addr
@@ -397,9 +438,9 @@ class Coordinator:
             # Queue the request if not already queued
             if node_id not in [x[0] for x in self.state.queue]:
                 self.state.queue.append((node_id, addr, seq))
-        
-        ack_msg = ACK(node_id=self.node_id, seq=seq, term=self.state.term, msg_type="REQ")
-        self.client_sock.sendto(serialize(ack_msg), addr)
+            # Send ACK only for queued requests
+            ack_msg = ACK(node_id=self.node_id, seq=seq, term=self.state.term, msg_type="REQ")
+            self.client_sock.sendto(serialize(ack_msg), addr)
     
     def _handle_heartbeat(self, node_id):
         """Handle HB message - must be called within state_lock."""
@@ -551,6 +592,10 @@ class Coordinator:
                         except socket.timeout:
                             self.state.backup_status[backup_key] = "suspect"
                             
+                    except socket.gaierror as e:
+                        # DNS resolution failed - peer is unreachable
+                        backup_key = f"{backup_addr[0]}:{backup_addr[1]}"
+                        self.state.backup_status[backup_key] = "unreachable"
                     except Exception as e:
                         backup_key = f"{backup_addr[0]}:{backup_addr[1]}"
                         self.state.backup_status[backup_key] = "suspect"
@@ -558,15 +603,18 @@ class Coordinator:
                 self.coord_sock.settimeout(None)
                 
                 # Check quorum after heartbeat round (including self)
-                total_coordinators = len(self.state.backup_addrs) + 1
-                majority_needed = (total_coordinators + 1) // 2
+                # Count only reachable peers for quorum (exclude DNS-unreachable)
+                reachable_peers = sum(1 for addr in self.state.backup_addrs
+                                     if self.state.backup_status.get(f"{addr[0]}:{addr[1]}") != "unreachable")
+                total_reachable = reachable_peers + 1  # +1 for self
+                majority_needed = (total_reachable + 1) // 2
                 quorum_achieved = (self.state.quorum_ack_count + 1) >= majority_needed  # +1 for self
                 
                 if not quorum_achieved:
                     current_time = time.time()
                     if self.state.quorum_lost_start is None:
                         self.state.quorum_lost_start = current_time
-                        print(f"Quorum lost: {self.state.quorum_ack_count + 1}/{total_coordinators} (need {majority_needed})")
+                        print(f"Quorum lost: {self.state.quorum_ack_count + 1}/{total_reachable} (need {majority_needed})")
                     elif current_time - self.state.quorum_lost_start > 3.0:
                         print(f"Quorum lost for 3+ seconds, stepping down")
                         self._step_down()
@@ -758,7 +806,7 @@ class Coordinator:
             seq=self.state.election_seq_counter,
             term=self.state.term,
             coord_id=self.node_id,
-            coord_addr=(socket.gethostname(), self.client_port)
+            coord_addr=(self._get_resolvable_hostname(), self.client_port)
         )
         
         broadcast_data = serialize(coord_msg)
@@ -769,9 +817,12 @@ class Coordinator:
                 
                 broadcast_sock.sendto(broadcast_data, ('255.255.255.255', self.client_port))
                 broadcast_sock.sendto(broadcast_data, ('127.0.0.1', self.client_port))
-                
+
                 for peer_addr in self.state.backup_addrs:
-                    broadcast_sock.sendto(broadcast_data, peer_addr)
+                    try:
+                        broadcast_sock.sendto(broadcast_data, peer_addr)
+                    except socket.gaierror as e:
+                        print(f"Skipping unreachable peer {peer_addr}: {e}")
                 
                 broadcast_sock.close()
                 print(f"Broadcast COORDINATOR: {coord_msg.coord_addr}")
