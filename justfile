@@ -9,6 +9,9 @@ _default:
 demo:
 	uv run scripts/demo.py
 
+ps:
+	{{runtime}} ps -a
+
 [group('local')]
 build:
 	{{runtime}} build -t critical-section .

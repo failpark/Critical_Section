@@ -269,13 +269,16 @@ class Coordinator:
         """Coordinator UDP server loop - handles SYNC/COORD_HB between coordinators."""
         self.coord_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.coord_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        
+
         try:
             self.coord_sock.bind((self.host, self.coord_port))
         except OSError:
             print(f"ERROR: Coordinator Port {self.coord_port} still in use! Please restart kernel.")
             self.running = False
             return
+
+        # Set timeout to allow periodic checks (election timeout, primary failure, etc.)
+        self.coord_sock.settimeout(0.5)
         
         while self.running:
             try:
@@ -451,10 +454,16 @@ class Coordinator:
                 try:
                     response_data, response_addr = self.coord_sock.recvfrom(1024)
                     response = deserialize(response_data)
-                    
-                    if (isinstance(response, SYNC_ACK) and 
-                        response.seq == self.state.sync_seq_counter and 
-                        response_addr[0] == backup_addr[0]):
+
+                    # Resolve hostname to IP for comparison
+                    try:
+                        expected_ip = socket.gethostbyname(backup_addr[0])
+                    except socket.gaierror:
+                        expected_ip = backup_addr[0]
+
+                    if (isinstance(response, SYNC_ACK) and
+                        response.seq == self.state.sync_seq_counter and
+                        response_addr[0] == expected_ip):
                         ack_count += 1
                         self.state.backup_status[backup_key] = "healthy"
                         print(f"SYNC_ACK received from backup {backup_addr}")
@@ -524,10 +533,16 @@ class Coordinator:
                         try:
                             response_data, response_addr = self.coord_sock.recvfrom(1024)
                             response = deserialize(response_data)
-                            
-                            if (isinstance(response, COORD_HB_ACK) and 
-                                response.seq == self.state.heartbeat_seq_counter and 
-                                response_addr[0] == backup_addr[0]):
+
+                            # Resolve hostname to IP for comparison
+                            try:
+                                expected_ip = socket.gethostbyname(backup_addr[0])
+                            except socket.gaierror:
+                                expected_ip = backup_addr[0]
+
+                            if (isinstance(response, COORD_HB_ACK) and
+                                response.seq == self.state.heartbeat_seq_counter and
+                                response_addr[0] == expected_ip):
                                 self.state.backup_status[backup_key] = "healthy"
                                 self.state.quorum_ack_count += 1
                             else:

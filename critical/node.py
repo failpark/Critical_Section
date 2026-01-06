@@ -91,7 +91,10 @@ def run_smart_node(node_id: Optional[str] = None, coord_ip: str = '127.0.0.1', c
 					term = max(term, grant_response.term)
 					time.sleep(1)
 					continue
-				
+
+			delay, backoff_delay = calculate_backoff_delay(backoff_delay)
+			time.sleep(delay)
+			continue
 
 		# Handle ACK without GRANT (request buffered during election)
 		if isinstance(grant_response, ACK) and grant_response.msg_type == "REQ":
