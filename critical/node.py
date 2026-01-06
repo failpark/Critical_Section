@@ -2,15 +2,14 @@ import socket
 import time
 import random
 import argparse
+import os
 from typing import Optional
 from protocol import REQ, GRANT, REL, HB, ACK, NACK, COORDINATOR, STEP_DOWN, ReliableSender, serialize, deserialize, Message
 
-COORD_IP = '127.0.0.1'
-PORT = 50000
 STATE_NORMAL = 'NORMAL'
 STATE_WAITING_FOR_COORDINATOR = 'WAITING_FOR_COORDINATOR'
 
-def run_smart_node(node_id: Optional[str] = None):
+def run_smart_node(node_id: Optional[str] = None, coord_ip: str = '127.0.0.1', coord_port: int = 50000):
 	sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 	sock.settimeout(2.0)
 
@@ -18,7 +17,7 @@ def run_smart_node(node_id: Optional[str] = None):
 	term = 0
 	reliable_sender = ReliableSender()
 	node_state = STATE_NORMAL
-	coord_addr = (COORD_IP, PORT)
+	coord_addr = (coord_ip, coord_port)
 	
 	print(f"--- Node {my_id} started ---")
 	
@@ -171,8 +170,10 @@ def wait_for_coordinator(sock: socket.socket, node_id: str) -> Optional[tuple]:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Smart node for distributed critical section')
-    parser.add_argument('--id', type=str, help='Node identifier (e.g., Node_1)')
-    args = parser.parse_args()
+	parser = argparse.ArgumentParser(description='Smart node for distributed critical section')
+	parser.add_argument('--id', type=str, help='Node identifier (e.g., Node_1)')
+	parser.add_argument('--coord-ip', type=str, default=os.environ.get('COORD_IP', '127.0.0.1'), help='Coordinator IP address')
+	parser.add_argument('--coord-port', type=int, default=int(os.environ.get('COORD_PORT', '50000')), help='Coordinator port')
+	args = parser.parse_args()
 
-    run_smart_node(node_id=args.id)
+	run_smart_node(node_id=args.id, coord_ip=args.coord_ip, coord_port=args.coord_port)

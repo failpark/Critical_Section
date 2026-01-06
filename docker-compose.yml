@@ -1,0 +1,121 @@
+version: '3.8'
+
+services:
+    primary:
+        build: .
+        container_name: cs_primary
+        command:
+            - critical/coordinator.py
+            - --role
+            - primary
+            - --id
+            - "100"
+            - --peers
+            - backup1:50001,backup2:50001
+            - --host
+            - 0.0.0.0
+        networks:
+            cs_network:
+                ipv4_address: 172.28.0.10
+        ports:
+            - "50000:50000/udp"
+            - "50001:50001/udp"
+
+    backup1:
+        build: .
+        container_name: cs_backup1
+        command:
+            - critical/coordinator.py
+            - --role
+            - backup
+            - --id
+            - "99"
+            - --peers
+            - primary:50001,backup2:50001
+            - --host
+            - 0.0.0.0
+        networks:
+            cs_network:
+                ipv4_address: 172.28.0.11
+        depends_on:
+            - primary
+
+    backup2:
+        build: .
+        container_name: cs_backup2
+        command:
+            - critical/coordinator.py
+            - --role
+            - backup
+            - --id
+            - "98"
+            - --peers
+            - primary:50001,backup1:50001
+            - --host
+            - 0.0.0.0
+        networks:
+            cs_network:
+                ipv4_address: 172.28.0.12
+        depends_on:
+            - primary
+
+    node1:
+        build: .
+        container_name: cs_node1
+        command:
+            - critical/node.py
+            - --id
+            - Node_1
+            - --coord-ip
+            - primary
+            - --coord-port
+            - "50000"
+        networks:
+            - cs_network
+        depends_on:
+            - primary
+            - backup1
+            - backup2
+
+    node2:
+        build: .
+        container_name: cs_node2
+        command:
+            - critical/node.py
+            - --id
+            - Node_2
+            - --coord-ip
+            - primary
+            - --coord-port
+            - "50000"
+        networks:
+            - cs_network
+        depends_on:
+            - primary
+            - backup1
+            - backup2
+
+    node3:
+        build: .
+        container_name: cs_node3
+        command:
+            - critical/node.py
+            - --id
+            - Node_3
+            - --coord-ip
+            - primary
+            - --coord-port
+            - "50000"
+        networks:
+            - cs_network
+        depends_on:
+            - primary
+            - backup1
+            - backup2
+
+networks:
+    cs_network:
+        driver: bridge
+        ipam:
+            config:
+                - subnet: 172.28.0.0/16

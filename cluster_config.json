@@ -1,0 +1,45 @@
+{
+	"cluster": {
+		"primary": {
+			"id": 100,
+			"host": "192.168.1.101",
+			"client_port": 50000,
+			"coord_port": 50001
+		},
+		"backups": [
+			{
+				"id": 99,
+				"host": "192.168.1.102",
+				"client_port": 50000,
+				"coord_port": 50001
+			},
+			{
+				"id": 98,
+				"host": "192.168.1.103",
+				"client_port": 50000,
+				"coord_port": 50001
+			}
+		]
+	},
+	"nodes": [
+		{
+			"id": "Node_1",
+			"host": "192.168.1.101"
+		},
+		{
+			"id": "Node_2",
+			"host": "192.168.1.102"
+		},
+		{
+			"id": "Node_3",
+			"host": "192.168.1.103"
+		}
+	],
+	"network": {
+		"default_client_port": 50000,
+		"default_coord_port": 50001,
+		"lease_duration": 5.0,
+		"heartbeat_interval": 1.0,
+		"election_timeout": 2.5
+	}
+}
