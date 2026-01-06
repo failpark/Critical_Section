@@ -66,6 +66,7 @@ def run_smart_node(node_id: Optional[str] = None, coord_ip: str = '127.0.0.1', c
 					continue
 				else:
 					print(f"[{my_id}] NACK received: {grant_response.reason}, retrying...")
+					term = max(term, grant_response.term)
 					time.sleep(1)
 					continue
 				
@@ -96,6 +97,7 @@ def run_smart_node(node_id: Optional[str] = None, coord_ip: str = '127.0.0.1', c
 					term = max(term, hb_response.term)
 				elif hb_response and isinstance(hb_response, NACK):
 					print(f"[{my_id}] HB NACK received: {hb_response.reason}")
+					term = max(term, hb_response.term)
 				elif hb_response is None:
 					print(f"[{my_id}] HB failed - coordinator may be down")
 					# Check for coordinator updates during failed heartbeat
@@ -115,6 +117,7 @@ def run_smart_node(node_id: Optional[str] = None, coord_ip: str = '127.0.0.1', c
 			term = max(term, rel_response.term)
 		elif rel_response and isinstance(rel_response, NACK):
 			print(f"[{my_id}] REL NACK received: {rel_response.reason}")
+			term = max(term, rel_response.term)
 		elif rel_response is None:
 			print(f"[{my_id}] REL failed - coordinator may be down")
 

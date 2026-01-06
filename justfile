@@ -1,3 +1,4 @@
+alias run := up
 runtime := "podman"
 compose := if runtime == "podman" { "podman compose" } else { "docker-compose" }
 export PODMAN_COMPOSE_PROVIDER := "podman-compose"
@@ -13,8 +14,8 @@ build:
 	{{runtime}} build -t critical-section .
 
 [group('local')]
-run:
-	{{compose}} up --build
+up:
+	{{compose}} up --build --force-recreate --remove-orphans
 
 [group('local')]
 watch-logs:
@@ -24,6 +25,9 @@ watch-logs:
 kill-prime:
 	{{compose}} stop primary
 
+[group('local')]
+nuclear:
+	podman rm -f $(podman ps -aq)
 
 # Example VLAN deployment (3 laptops: 192.168.1.101, .102, .103):
 #   Laptop .101: just vlan-prime 192.168.1.102 192.168.1.103

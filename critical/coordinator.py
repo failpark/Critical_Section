@@ -31,6 +31,7 @@ class CoordinatorState:
 	quorum_ack_count: int = 0
 	last_quorum_check: float = 0.0
 	quorum_lost_start: Optional[float] = None
+	current_primary_addr: Optional[Tuple[str, int]] = None
 
 
 @dataclass
@@ -246,9 +247,13 @@ class Coordinator:
                             self.client_sock.sendto(serialize(ack_msg), addr)
                     else:  # BACKUP
                         # Send NACK redirect for all client messages
-                        primary_addr = ('192.168.1.101', 50000)  # Default primary address
-                        if self.state.backup_addrs:
-                            primary_addr = self.state.backup_addrs[0]
+                        if self.state.current_primary_addr:
+                            primary_addr = self.state.current_primary_addr
+                        elif self.state.backup_addrs:
+                            # Fallback: first peer with client port
+                            primary_addr = (self.state.backup_addrs[0][0], self.client_port)
+                        else:
+                            primary_addr = ('primary', 50000)
                         nack_msg = NACK(node_id=self.node_id, seq=msg.seq, term=self.state.term, msg_type=msg.type, reason=f"redirect_to_{primary_addr[0]}:{primary_addr[1]}")
                         self.client_sock.sendto(serialize(nack_msg), addr)
                         
@@ -337,18 +342,19 @@ class Coordinator:
                         if msg.term >= self.state.term:
                             if self.state.role in ['CANDIDATE', 'PRIMARY']:
                                 print(f"Stepping down to BACKUP: received COORDINATOR from {msg.coord_id}")
-                            
+
                             self.state.role = 'BACKUP'
                             self.state.election_in_progress = False
                             self.state.primary_suspected_failed = False
                             self.state.last_primary_hb = time.time()
-                            
+                            self.state.current_primary_addr = msg.coord_addr
+
                             # Discard pending requests when becoming BACKUP
                             if self.state.pending_requests:
                                 discarded_count = len(self.state.pending_requests)
                                 self.state.pending_requests.clear()
                                 print(f"Discarded {discarded_count} pending requests, new primary will handle")
-                            
+
                             print(f"New coordinator: {msg.coord_id} at {msg.coord_addr}")
                         else:
                             print(f"Rejected COORDINATOR with stale term {msg.term} < {self.state.term}")
@@ -737,7 +743,7 @@ class Coordinator:
             seq=self.state.election_seq_counter,
             term=self.state.term,
             coord_id=self.node_id,
-            coord_addr=(self.host if self.host != '0.0.0.0' else '127.0.0.1', self.client_port)
+            coord_addr=(socket.gethostname(), self.client_port)
         )
         
         broadcast_data = serialize(coord_msg)
@@ -762,17 +768,17 @@ class Coordinator:
         """Broadcast COORDINATOR message to inform nodes of new coordinator - must be called within state_lock."""
         if self.state.role != 'BACKUP':
             return
-            
+
         try:
             broadcast_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             broadcast_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            
+
             coord_msg = COORDINATOR(
-                node_id=self.node_id, 
-                seq=1, 
+                node_id=self.node_id,
+                seq=1,
                 term=self.state.term,
                 coord_id=self.node_id,
-                coord_addr=(self.host if self.host != '0.0.0.0' else '127.0.0.1', self.client_port)
+                coord_addr=(socket.gethostname(), self.client_port)
             )
             
             broadcast_data = serialize(coord_msg)
