@@ -228,11 +228,18 @@ class ReliableSender:
 							continue
 						
 						print(f"DEBUG: Deserialized {response.type} with seq={response.seq}")
-						
-						if response_addr != addr:
-							print(f"DEBUG: Response from wrong address {response_addr} != {addr}")
+
+						# Resolve hostname to IP for comparison
+						try:
+							expected_ip = socket.gethostbyname(addr[0])
+						except socket.gaierror:
+							expected_ip = addr[0]
+						expected_addr = (expected_ip, addr[1])
+
+						if response_addr != expected_addr:
+							print(f"DEBUG: Response from wrong address {response_addr} != {expected_addr}")
 							continue
-						
+
 						sender_key = f"{response_addr[0]}:{response_addr[1]}"
 						
 						if sender_key in self.last_seen_seq:

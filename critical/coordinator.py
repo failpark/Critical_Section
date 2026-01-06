@@ -436,7 +436,7 @@ class Coordinator:
         ack_count = 0
         for backup_addr in self.state.backup_addrs:
             try:
-                coord_addr = (backup_addr[0], backup_addr[1] + 1)
+                coord_addr = backup_addr  # Port already correct from config
                 backup_key = f"{backup_addr[0]}:{backup_addr[1]}"
                 
                 self.coord_sock.settimeout(1.0)
@@ -509,7 +509,7 @@ class Coordinator:
                 
                 for backup_addr in self.state.backup_addrs:
                     try:
-                        coord_addr = (backup_addr[0], backup_addr[1] + 1)
+                        coord_addr = backup_addr  # Port already correct from config
                         backup_key = f"{backup_addr[0]}:{backup_addr[1]}"
                         
                         self.coord_sock.settimeout(0.5)
@@ -575,8 +575,7 @@ class Coordinator:
                 
                 # Broadcast to all coordinators and nodes
                 for peer_addr in self.state.backup_addrs:
-                    coord_addr = (peer_addr[0], peer_addr[1] + 1)
-                    broadcast_sock.sendto(step_down_data, coord_addr)
+                    broadcast_sock.sendto(step_down_data, peer_addr)
                 
                 broadcast_sock.sendto(step_down_data, ('255.255.255.255', self.client_port))
                 broadcast_sock.sendto(step_down_data, ('127.0.0.1', self.client_port))
@@ -618,7 +617,7 @@ class Coordinator:
         for peer_addr in self.state.backup_addrs:
             for i in range(98, 105):
                 if i > my_id:
-                    higher_peers.append((peer_addr[0], peer_addr[1] + 1))
+                    higher_peers.append(peer_addr)
         return higher_peers
 
     def _check_primary_failure(self):
@@ -652,10 +651,9 @@ class Coordinator:
         # - If no response, we win the election
         for peer_addr in self.state.backup_addrs:
             try:
-                peer_host = peer_addr[0]
-                peer_base_port = peer_addr[1]
-                coord_addr = (peer_host, peer_base_port + 1)
-                
+                # Port already correct from config
+                coord_addr = peer_addr
+
                 # For now, assume any peer might have a higher ID
                 # In the test scenario, this will be the primary coordinator
                 higher_peers.append(coord_addr)
@@ -752,8 +750,7 @@ class Coordinator:
                 broadcast_sock.sendto(broadcast_data, ('127.0.0.1', self.client_port))
                 
                 for peer_addr in self.state.backup_addrs:
-                    coord_addr = (peer_addr[0], peer_addr[1] + 1)
-                    broadcast_sock.sendto(broadcast_data, coord_addr)
+                    broadcast_sock.sendto(broadcast_data, peer_addr)
                 
                 broadcast_sock.close()
                 print(f"Broadcast COORDINATOR: {coord_msg.coord_addr}")
