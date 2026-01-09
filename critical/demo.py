@@ -160,7 +160,9 @@ class DemoMonitor:
 def happy_path_demo():
 	print("Starting Happy Path Demo...")
 	print("This demo shows normal operation with 3 nodes cycling through the critical section")
-	
+	print("Note: Built-in failure simulation is active (30% message drop, node failures)")
+	print("To disable failures, set environment variables: DROP_RATE=0 FAILURE_PROB=0")
+
 	manager, config, logger = setup_test_environment()
 	display = VisualDisplay()
 	
@@ -213,7 +215,9 @@ def happy_path_demo():
 def failure_injection_demo():
 	print("Starting Failure Injection Demo...")
 	print("This demo shows coordinator failover and system recovery")
-	
+	print("Note: Built-in failure simulation is active (30% message drop, node failures)")
+	print("Additionally, we will manually kill the primary coordinator to demonstrate failover")
+
 	manager, config, logger = setup_test_environment()
 	display = VisualDisplay()
 	

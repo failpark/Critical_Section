@@ -7,6 +7,7 @@ from collections import deque
 from typing import Optional, Dict, List, Tuple, Any
 from dataclasses import dataclass, field
 from protocol import REQ, GRANT, REL, HB, ACK, NACK, SYNC, SYNC_ACK, COORD_HB, COORD_HB_ACK, COORDINATOR, ELECTION, OK, STEP_DOWN, serialize, deserialize, Message
+from failures import MessageDropWrapper, NodeFailureSimulator
 
 
 @dataclass
@@ -80,13 +81,18 @@ class Coordinator:
     Extracted from Jupyter notebook for better modularity.
     """
     
-    def __init__(self, host='0.0.0.0', client_port=50000, coord_port=50001, lease_duration=5.0, 
-                 role='PRIMARY', node_id=100, peers=None):
+    def __init__(self, host='0.0.0.0', client_port=50000, coord_port=50001, lease_duration=5.0,
+                 role='PRIMARY', node_id=100, peers=None, drop_rate=0.0, failure_prob=0.0, permanent_failure_prob=0.10):
         self.host = host
         self.client_port = client_port
         self.coord_port = coord_port
         self.lease_duration = lease_duration
-        
+
+        # Failure simulation parameters
+        self.drop_rate = drop_rate
+        self.failure_prob = failure_prob
+        self.permanent_failure_prob = permanent_failure_prob
+
         # State variables (protected by state_lock)
         self.state_lock = threading.Lock()
         self.running = True
@@ -101,7 +107,13 @@ class Coordinator:
             backup_addrs=peers or []
         )
         self.node_id = f"Node_{node_id}"
-        
+
+        # Initialize failure simulator if configured
+        self.failure_sim = None
+        if failure_prob > 0:
+            self.failure_sim = NodeFailureSimulator(failure_prob, permanent_failure_prob, self.node_id)
+            print(f"--- {self.node_id} failure probability: {failure_prob*100:.2f}% per check ---")
+
         # Network
         self.client_sock = None
         self.coord_sock = None
@@ -197,15 +209,29 @@ class Coordinator:
         """Client UDP server loop - handles REQ/REL/HB from nodes."""
         self.client_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.client_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        
+
         try:
             self.client_sock.bind((self.host, self.client_port))
         except OSError:
             print(f"ERROR: Client Port {self.client_port} still in use! Please restart kernel.")
             self.running = False
             return
-        
+
+        # Wrap socket for message dropping if configured
+        if self.drop_rate > 0:
+            self.client_sock = MessageDropWrapper(self.client_sock, self.drop_rate)
+            print(f"--- {self.node_id} client socket message drop rate: {self.drop_rate*100:.0f}% ---")
+
         while self.running:
+            # Check for node failure simulation
+            if self.failure_sim:
+                if self.failure_sim.is_failed():
+                    self.failure_sim.maybe_recover()
+                    time.sleep(0.5)
+                    continue  # Skip all processing while failed
+
+                # Check if failure should be triggered
+                self.failure_sim.check_for_failure()
             try:
                 # Automatic grants on lease expiry (PRIMARY only)
                 if self.state.role == 'PRIMARY':
@@ -305,10 +331,24 @@ class Coordinator:
             self.running = False
             return
 
+        # Wrap socket for message dropping if configured
+        if self.drop_rate > 0:
+            self.coord_sock = MessageDropWrapper(self.coord_sock, self.drop_rate)
+            print(f"--- {self.node_id} coord socket message drop rate: {self.drop_rate*100:.0f}% ---")
+
         # Set timeout to allow periodic checks (election timeout, primary failure, etc.)
         self.coord_sock.settimeout(0.5)
-        
+
         while self.running:
+            # Check for node failure simulation
+            if self.failure_sim:
+                if self.failure_sim.is_failed():
+                    self.failure_sim.maybe_recover()
+                    time.sleep(0.5)
+                    continue  # Skip all processing while failed
+
+                # Check if failure should be triggered
+                self.failure_sim.check_for_failure()
             try:
                 # Check for primary failure (BACKUP only)
                 if self.state.role == 'BACKUP':
@@ -543,10 +583,20 @@ class Coordinator:
     def _heartbeat_sender(self):
         """Send COORD_HB to all backup coordinators every 1 second (PRIMARY only)."""
         print("Heartbeat sender thread started")
-        
+
         while self.running and self.state.role == 'PRIMARY':
+            # Check for node failure simulation
+            if self.failure_sim:
+                if self.failure_sim.is_failed():
+                    self.failure_sim.maybe_recover()
+                    time.sleep(0.5)
+                    continue  # Skip all processing while failed
+
+                # Check if failure should be triggered
+                self.failure_sim.check_for_failure()
+
             time.sleep(1.0)
-            
+
             if not self.running:
                 break
                 
@@ -877,6 +927,14 @@ def parse_peers(peers_str: str) -> List[Tuple[str, int]]:
 
 def main():
     """Main function with CLI argument parsing for PRIMARY/BACKUP roles."""
+    # Default failure simulation parameters for presentation
+    # P(at least 1 failure in 30s) = 0.9 with ~6 nodes
+    # λ = -ln(0.1)/30 ≈ 0.077 failures/second total
+    # Per node: 0.077/6 ≈ 0.013 per second
+    DEFAULT_DROP_RATE = 0.3  # 30% message loss
+    DEFAULT_FAILURE_PROB = 0.013  # ~1.3% per check
+    DEFAULT_PERMANENT_PROB = 0.10  # 10% chance of permanent failure
+
     parser = argparse.ArgumentParser(description='Distributed Coordinator with PRIMARY/BACKUP roles')
     parser.add_argument('--role', choices=['primary', 'backup'], required=True,
                       help='Coordinator role: primary or backup')
@@ -890,19 +948,31 @@ def main():
                       help='Client port (default: 50000)')
     parser.add_argument('--coord-port', type=int, default=50001,
                       help='Coordinator port (default: 50001)')
-    
+    parser.add_argument('--drop-rate', type=float,
+                      default=float(os.environ.get('DROP_RATE', DEFAULT_DROP_RATE)),
+                      help=f'Message drop probability (default: {DEFAULT_DROP_RATE*100:.0f}%% from env)')
+    parser.add_argument('--failure-prob', type=float,
+                      default=float(os.environ.get('FAILURE_PROB', DEFAULT_FAILURE_PROB)),
+                      help=f'Node failure probability per check (default: {DEFAULT_FAILURE_PROB*100:.2f}%% from env)')
+    parser.add_argument('--permanent-failure-prob', type=float,
+                      default=float(os.environ.get('PERMANENT_FAILURE_PROB', DEFAULT_PERMANENT_PROB)),
+                      help=f'Probability failure is permanent (default: {DEFAULT_PERMANENT_PROB*100:.0f}%%)')
+
     args = parser.parse_args()
-    
+
     peers = parse_peers(args.peers)
     role = args.role.upper()
-    
+
     coordinator = Coordinator(
         host=args.host,
         client_port=args.client_port,
         coord_port=args.coord_port,
         role=role,
         node_id=args.id,
-        peers=peers
+        peers=peers,
+        drop_rate=args.drop_rate,
+        failure_prob=args.failure_prob,
+        permanent_failure_prob=args.permanent_failure_prob
     )
     
     try:

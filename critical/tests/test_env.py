@@ -34,7 +34,7 @@ class ProcessManager:
 	def __init__(self, config: NetworkConfig):
 		self.config = config
 		self.processes: List[ProcessInfo] = []
-	
+
 	def start_coordinator(self, role: str, node_id: int, port: int) -> ProcessInfo:
 		peers = self.config.get_peer_string(port)
 		cmd = [
@@ -43,6 +43,8 @@ class ProcessManager:
 			'--id', str(node_id),
 			'--peers', peers
 		]
+		# Note: Failure simulation is now built-in via environment variables
+		# Set DROP_RATE=0 and FAILURE_PROB=0 to disable
 		
 		env = os.environ.copy()
 		env['PYTHONPATH'] = '/Users/phedias/code/sem3/algo_dist_sys/Critical_Section'
@@ -67,6 +69,8 @@ class ProcessManager:
 	
 	def start_node(self, node_id: str) -> ProcessInfo:
 		cmd = ['uv', 'run', 'critical/node.py', '--id', node_id]
+		# Note: Failure simulation is now built-in via environment variables
+		# Set DROP_RATE=0 and FAILURE_PROB=0 to disable
 
 		env = os.environ.copy()
 		env['PYTHONPATH'] = '/Users/phedias/code/sem3/algo_dist_sys/Critical_Section'
@@ -199,13 +203,23 @@ class TimestampLogger:
 	def clear_logs(self):
 		self.logs.clear()
 
-def setup_test_environment(drop_rate: float = 0.0) -> Tuple[ProcessManager, NetworkConfig, TimestampLogger]:
+def setup_test_environment() -> Tuple[ProcessManager, NetworkConfig, TimestampLogger]:
+	"""
+	Setup test environment.
+
+	Note: Failure simulation (30% message drop, node failures) is now built-in.
+	To disable for testing, set environment variables before calling:
+		os.environ['DROP_RATE'] = '0'
+		os.environ['FAILURE_PROB'] = '0'
+	"""
 	config = NetworkConfig()
 	manager = ProcessManager(config)
 	logger = TimestampLogger()
-	
-	logger.log_event('SETUP', f"Test environment initialized with {drop_rate*100}% message drop rate")
-	
+
+	drop_rate = float(os.environ.get('DROP_RATE', '0.3'))
+	failure_prob = float(os.environ.get('FAILURE_PROB', '0.013'))
+	logger.log_event('SETUP', f"Test environment initialized (built-in failures: {drop_rate*100:.0f}% drop, {failure_prob*100:.2f}% fail prob)")
+
 	return manager, config, logger
 
 def standard_cluster_startup(manager: ProcessManager, logger: TimestampLogger) -> Dict[str, ProcessInfo]:

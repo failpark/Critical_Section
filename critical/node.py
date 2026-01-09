@@ -5,6 +5,7 @@ import argparse
 import os
 from typing import Optional
 from protocol import REQ, GRANT, REL, HB, ACK, NACK, COORDINATOR, STEP_DOWN, ReliableSender, serialize, deserialize, Message
+from failures import MessageDropWrapper, NodeFailureSimulator
 
 STATE_NORMAL = 'NORMAL'
 STATE_WAITING_FOR_COORDINATOR = 'WAITING_FOR_COORDINATOR'
@@ -27,20 +28,41 @@ def calculate_backoff_delay(current_backoff: float) -> tuple[float, float]:
 	next_backoff = min(current_backoff * BACKOFF_MULTIPLIER, MAX_BACKOFF)
 	return delay, next_backoff
 
-def run_smart_node(node_id: Optional[str] = None, coord_ip: str = '127.0.0.1', coord_port: int = 50000):
+def run_smart_node(node_id: Optional[str] = None, coord_ip: str = '127.0.0.1', coord_port: int = 50000, drop_rate: float = 0.0, failure_prob: float = 0.0, permanent_failure_prob: float = 0.10):
 	sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 	sock.settimeout(2.0)
 
 	my_id = node_id if node_id else f"Node_{random.randint(10, 99)}"
+
+	# Wrap socket for message dropping if configured
+	if drop_rate > 0:
+		sock = MessageDropWrapper(sock, drop_rate)
+		print(f"--- Node {my_id} message drop rate: {drop_rate*100:.0f}% ---")
+
+	# Initialize failure simulator if configured
+	failure_sim = None
+	if failure_prob > 0:
+		failure_sim = NodeFailureSimulator(failure_prob, permanent_failure_prob, my_id)
+		print(f"--- Node {my_id} failure probability: {failure_prob*100:.2f}% per check ---")
+
 	term = 0
 	reliable_sender = ReliableSender()
 	node_state = STATE_NORMAL
 	coord_addr = (coord_ip, coord_port)
 	backoff_delay = INITIAL_BACKOFF
-	
+
 	print(f"--- Node {my_id} started ---")
-	
+
 	while True:
+		# Check for node failure simulation
+		if failure_sim:
+			if failure_sim.is_failed():
+				failure_sim.maybe_recover()
+				time.sleep(0.5)
+				continue  # Skip all processing while failed
+
+			# Check if failure should be triggered
+			failure_sim.check_for_failure()
 		if node_state == STATE_WAITING_FOR_COORDINATOR:
 			print(f"[{my_id}] Waiting for new coordinator...")
 			coord_addr = wait_for_coordinator(sock, my_id)
@@ -209,10 +231,27 @@ def wait_for_coordinator(sock: socket.socket, node_id: str) -> Optional[tuple]:
 
 
 if __name__ == "__main__":
+	# Default failure simulation parameters for presentation
+	# P(at least 1 failure in 30s) = 0.9 with ~6 nodes
+	# λ = -ln(0.1)/30 ≈ 0.077 failures/second total
+	# Per node: 0.077/6 ≈ 0.013 per second
+	DEFAULT_DROP_RATE = 0.3  # 30% message loss
+	DEFAULT_FAILURE_PROB = 0.013  # ~1.3% per check
+	DEFAULT_PERMANENT_PROB = 0.10  # 10% chance of permanent failure
+
 	parser = argparse.ArgumentParser(description='Smart node for distributed critical section')
 	parser.add_argument('--id', type=str, help='Node identifier (e.g., Node_1)')
 	parser.add_argument('--coord-ip', type=str, default=os.environ.get('COORD_IP', '127.0.0.1'), help='Coordinator IP address')
 	parser.add_argument('--coord-port', type=int, default=int(os.environ.get('COORD_PORT', '50000')), help='Coordinator port')
+	parser.add_argument('--drop-rate', type=float,
+	                    default=float(os.environ.get('DROP_RATE', DEFAULT_DROP_RATE)),
+	                    help=f'Message drop probability (default: {DEFAULT_DROP_RATE*100:.0f}%% from env)')
+	parser.add_argument('--failure-prob', type=float,
+	                    default=float(os.environ.get('FAILURE_PROB', DEFAULT_FAILURE_PROB)),
+	                    help=f'Node failure probability per check (default: {DEFAULT_FAILURE_PROB*100:.2f}%% from env)')
+	parser.add_argument('--permanent-failure-prob', type=float,
+	                    default=float(os.environ.get('PERMANENT_FAILURE_PROB', DEFAULT_PERMANENT_PROB)),
+	                    help=f'Probability failure is permanent (default: {DEFAULT_PERMANENT_PROB*100:.0f}%%)')
 	args = parser.parse_args()
 
-	run_smart_node(node_id=args.id, coord_ip=args.coord_ip, coord_port=args.coord_port)
+	run_smart_node(node_id=args.id, coord_ip=args.coord_ip, coord_port=args.coord_port, drop_rate=args.drop_rate, failure_prob=args.failure_prob, permanent_failure_prob=args.permanent_failure_prob)
