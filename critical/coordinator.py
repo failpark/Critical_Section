@@ -18,9 +18,12 @@ class CoordinatorState:
 	lease_expiry: float
 	queue: deque = field(default_factory=deque)
 	known_nodes: set = field(default_factory=set)
+	known_node_addrs: Dict[str, Tuple[str, int]] = field(default_factory=dict)  # Track client addresses for broadcast
 	last_seen_seq: Dict[str, int] = field(default_factory=dict)
 	backup_addrs: List[Tuple[str, int]] = field(default_factory=list)
 	backup_status: Dict[str, str] = field(default_factory=dict)
+	suspect_count: Dict[str, int] = field(default_factory=dict)  # Track consecutive failures
+	dead_peers: set = field(default_factory=set)  # Peers excluded from quorum
 	sync_seq_counter: int = 0
 	last_primary_hb: float = 0.0
 	primary_suspected_failed: bool = False
@@ -36,6 +39,7 @@ class CoordinatorState:
 	last_quorum_check: float = 0.0
 	quorum_lost_start: Optional[float] = None
 	current_primary_addr: Optional[Tuple[str, int]] = None
+	last_coordinator_announcement: float = 0.0  # Track last coordinator broadcast time
 
 
 @dataclass
@@ -201,6 +205,7 @@ class Coordinator:
                 'running': self.running,
                 'role': self.state.role,
                 'backup_status': self.state.backup_status.copy(),
+                'dead_peers': set(self.state.dead_peers),
                 'term': self.state.term,
                 'primary_suspected_failed': self.state.primary_suspected_failed,
                 'last_primary_hb': self.state.last_primary_hb
@@ -262,7 +267,8 @@ class Coordinator:
                 
                 with self.state_lock:
                     self.state.known_nodes.add(msg.node_id)
-                    
+                    self.state.known_node_addrs[msg.node_id] = addr
+
                     # Validate term first
                     if not self._validate_term(msg, addr, self.client_sock):
                         continue
@@ -534,10 +540,15 @@ class Coordinator:
         
         ack_count = 0
         for backup_addr in self.state.backup_addrs:
+            backup_key = f"{backup_addr[0]}:{backup_addr[1]}"
+
+            # Skip dead peers - no point trying to sync
+            if backup_key in self.state.dead_peers:
+                continue
+
             try:
                 coord_addr = backup_addr  # Port already correct from config
-                backup_key = f"{backup_addr[0]}:{backup_addr[1]}"
-                
+
                 self.coord_sock.settimeout(1.0)
                 self.coord_sock.sendto(sync_data, coord_addr)
                 
@@ -571,11 +582,15 @@ class Coordinator:
                 print(f"Failed to sync to backup {backup_addr}: {e}")
         
         self.coord_sock.settimeout(None)
-        
-        majority_needed = (len(self.state.backup_addrs) + 1) // 2
+
+        # Calculate quorum excluding dead peers (same as heartbeat quorum)
+        alive_peers = sum(1 for addr in self.state.backup_addrs
+                         if f"{addr[0]}:{addr[1]}" not in self.state.dead_peers)
+        total_alive = alive_peers + 1  # +1 for self
+        majority_needed = (total_alive + 1) // 2
         if ack_count < majority_needed:
-            print(f"WARNING: SYNC majority not reached ({ack_count}/{len(self.state.backup_addrs)}, need {majority_needed})")
-        
+            print(f"WARNING: SYNC majority not reached ({ack_count}/{alive_peers}, need {majority_needed})")
+
         return ack_count
     
     def _apply_state_snapshot(self, snapshot_dict: Dict[str, Any]):
@@ -652,36 +667,47 @@ class Coordinator:
                                 response.seq == self.state.heartbeat_seq_counter and
                                 response_addr[0] == expected_ip):
                                 self.state.backup_status[backup_key] = "healthy"
+                                self.state.suspect_count[backup_key] = 0  # Reset on success
                                 self.state.quorum_ack_count += 1
                             else:
                                 self.state.backup_status[backup_key] = "suspect"
+                                self.state.suspect_count[backup_key] = self.state.suspect_count.get(backup_key, 0) + 1
                                 
                         except socket.timeout:
                             self.state.backup_status[backup_key] = "suspect"
-                            
+                            self.state.suspect_count[backup_key] = self.state.suspect_count.get(backup_key, 0) + 1
+
                     except socket.gaierror as e:
                         # DNS resolution failed - peer is unreachable
                         backup_key = f"{backup_addr[0]}:{backup_addr[1]}"
                         self.state.backup_status[backup_key] = "unreachable"
+                        self.state.suspect_count[backup_key] = self.state.suspect_count.get(backup_key, 0) + 1
                     except Exception as e:
                         backup_key = f"{backup_addr[0]}:{backup_addr[1]}"
                         self.state.backup_status[backup_key] = "suspect"
+                        self.state.suspect_count[backup_key] = self.state.suspect_count.get(backup_key, 0) + 1
+
+                    # Check if peer should be marked as dead (3+ consecutive failures)
+                    if self.state.suspect_count.get(backup_key, 0) >= 3 and backup_key not in self.state.dead_peers:
+                        self.state.dead_peers.add(backup_key)
+                        print(f"[{self.node_id}] Marking {backup_key} as DEAD after {self.state.suspect_count[backup_key]} failures")
 
                 self.hb_sock.settimeout(None)
                 
                 # Check quorum after heartbeat round (including self)
-                # Count only reachable peers for quorum (exclude DNS-unreachable)
-                reachable_peers = sum(1 for addr in self.state.backup_addrs
-                                     if self.state.backup_status.get(f"{addr[0]}:{addr[1]}") != "unreachable")
-                total_reachable = reachable_peers + 1  # +1 for self
-                majority_needed = (total_reachable + 1) // 2
+                # Count only alive peers for quorum (exclude unreachable and dead)
+                alive_peers = sum(1 for addr in self.state.backup_addrs
+                                 if f"{addr[0]}:{addr[1]}" not in self.state.dead_peers and
+                                    self.state.backup_status.get(f"{addr[0]}:{addr[1]}") != "unreachable")
+                total_alive = alive_peers + 1  # +1 for self
+                majority_needed = (total_alive + 1) // 2
                 quorum_achieved = (self.state.quorum_ack_count + 1) >= majority_needed  # +1 for self
                 
                 if not quorum_achieved:
                     current_time = time.time()
                     if self.state.quorum_lost_start is None:
                         self.state.quorum_lost_start = current_time
-                        print(f"Quorum lost: {self.state.quorum_ack_count + 1}/{total_reachable} (need {majority_needed})")
+                        print(f"Quorum lost: {self.state.quorum_ack_count + 1}/{total_alive} (need {majority_needed})")
                     elif current_time - self.state.quorum_lost_start > 3.0:
                         print(f"Quorum lost for 3+ seconds, stepping down")
                         self._step_down()
@@ -690,6 +716,11 @@ class Coordinator:
                     if self.state.quorum_lost_start is not None:
                         print("Quorum restored")
                     self.state.quorum_lost_start = None
+
+                # Periodic coordinator re-announcement (every 10 seconds)
+                current_time = time.time()
+                if current_time - self.state.last_coordinator_announcement >= 10.0:
+                    self._broadcast_coordinator_announcement()
 
         # Cleanup heartbeat socket
         if self.hb_sock:
@@ -877,6 +908,8 @@ class Coordinator:
 
     def _broadcast_coordinator_announcement(self):
         """Broadcast COORDINATOR message after winning election - must be called within state_lock."""
+        self.state.last_coordinator_announcement = time.time()
+
         coord_msg = COORDINATOR(
             node_id=self.node_id,
             seq=self.state.election_seq_counter,
@@ -893,6 +926,14 @@ class Coordinator:
                 
                 broadcast_sock.sendto(broadcast_data, ('255.255.255.255', self.client_port))
                 broadcast_sock.sendto(broadcast_data, ('127.0.0.1', self.client_port))
+
+                # Unicast to all known client nodes (cross-subnet support)
+                for node_id, node_addr in self.state.known_node_addrs.items():
+                    try:
+                        broadcast_sock.sendto(broadcast_data, node_addr)
+                        print(f"[{self.node_id}] Sent COORDINATOR to known node {node_id} at {node_addr}")
+                    except Exception as e:
+                        print(f"[{self.node_id}] Failed to send to {node_id}: {e}")
 
                 for peer_addr in self.state.backup_addrs:
                     try:
