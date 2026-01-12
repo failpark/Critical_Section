@@ -117,6 +117,7 @@ class Coordinator:
         # Network
         self.client_sock = None
         self.coord_sock = None
+        self.hb_sock = None  # Separate socket for heartbeat sending to avoid race conditions
         self.client_thread = None
         self.coord_thread = None
         self.heartbeat_thread = None
@@ -303,12 +304,20 @@ class Coordinator:
                         # Send NACK redirect for all client messages
                         if self.state.current_primary_addr:
                             primary_addr = self.state.current_primary_addr
-                        elif self.state.backup_addrs:
-                            # Fallback: first peer with client port
-                            primary_addr = (self.state.backup_addrs[0][0], self.client_port)
+                            # Try to resolve hostname to IP for better connectivity
+                            try:
+                                primary_ip = socket.gethostbyname(primary_addr[0])
+                                reason = f"redirect_to_{primary_ip}:{primary_addr[1]}"
+                            except socket.gaierror:
+                                # Fallback to hostname if DNS resolution fails
+                                reason = f"redirect_to_{primary_addr[0]}:{primary_addr[1]}"
+                            nack_msg = NACK(node_id=self.node_id, seq=msg.seq, term=self.state.term, msg_type=msg.type, reason=reason)
+                        elif self.state.election_in_progress or self.state.awaiting_coordinator:
+                            # Election in progress - tell client to retry later
+                            nack_msg = NACK(node_id=self.node_id, seq=msg.seq, term=self.state.term, msg_type=msg.type, reason="election_in_progress")
                         else:
-                            primary_addr = ('primary', 50000)
-                        nack_msg = NACK(node_id=self.node_id, seq=msg.seq, term=self.state.term, msg_type=msg.type, reason=f"redirect_to_{primary_addr[0]}:{primary_addr[1]}")
+                            # No primary known and no election - shouldn't happen but handle gracefully
+                            nack_msg = NACK(node_id=self.node_id, seq=msg.seq, term=self.state.term, msg_type=msg.type, reason="no_primary_available")
                         self.client_sock.sendto(serialize(nack_msg), addr)
                         
             except Exception as e:
@@ -584,6 +593,14 @@ class Coordinator:
         """Send COORD_HB to all backup coordinators every 1 second (PRIMARY only)."""
         print("Heartbeat sender thread started")
 
+        # Create separate socket for heartbeat communication
+        if not self.hb_sock:
+            self.hb_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.hb_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # Wrap for message dropping if configured
+            if self.drop_rate > 0:
+                self.hb_sock = MessageDropWrapper(self.hb_sock, self.drop_rate)
+
         while self.running and self.state.role == 'PRIMARY':
             # Check for node failure simulation
             if self.failure_sim:
@@ -617,12 +634,12 @@ class Coordinator:
                     try:
                         coord_addr = backup_addr  # Port already correct from config
                         backup_key = f"{backup_addr[0]}:{backup_addr[1]}"
-                        
-                        self.coord_sock.settimeout(0.5)
-                        self.coord_sock.sendto(hb_data, coord_addr)
-                        
+
+                        self.hb_sock.settimeout(0.5)
+                        self.hb_sock.sendto(hb_data, coord_addr)
+
                         try:
-                            response_data, response_addr = self.coord_sock.recvfrom(1024)
+                            response_data, response_addr = self.hb_sock.recvfrom(1024)
                             response = deserialize(response_data)
 
                             # Resolve hostname to IP for comparison
@@ -649,8 +666,8 @@ class Coordinator:
                     except Exception as e:
                         backup_key = f"{backup_addr[0]}:{backup_addr[1]}"
                         self.state.backup_status[backup_key] = "suspect"
-                        
-                self.coord_sock.settimeout(None)
+
+                self.hb_sock.settimeout(None)
                 
                 # Check quorum after heartbeat round (including self)
                 # Count only reachable peers for quorum (exclude DNS-unreachable)
@@ -673,7 +690,15 @@ class Coordinator:
                     if self.state.quorum_lost_start is not None:
                         print("Quorum restored")
                     self.state.quorum_lost_start = None
-        
+
+        # Cleanup heartbeat socket
+        if self.hb_sock:
+            try:
+                self.hb_sock.close()
+            except:
+                pass
+            self.hb_sock = None
+
         print("Heartbeat sender thread ended")
 
     def _step_down(self):
@@ -845,9 +870,10 @@ class Coordinator:
         self._broadcast_coordinator_announcement()
         
         # Start heartbeat thread if we have backup coordinators
-        if self.state.backup_addrs and not self.heartbeat_thread:
+        if self.state.backup_addrs and (not self.heartbeat_thread or not self.heartbeat_thread.is_alive()):
             self.heartbeat_thread = threading.Thread(target=self._heartbeat_sender, daemon=True)
             self.heartbeat_thread.start()
+            print("Started new heartbeat sender thread after becoming PRIMARY")
 
     def _broadcast_coordinator_announcement(self):
         """Broadcast COORDINATOR message after winning election - must be called within state_lock."""

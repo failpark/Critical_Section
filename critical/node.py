@@ -107,6 +107,14 @@ def run_smart_node(node_id: Optional[str] = None, coord_ip: str = '127.0.0.1', c
 						print(f"[{my_id}] Redirected to coordinator at {coord_addr}")
 					backoff_delay = INITIAL_BACKOFF
 					continue
+				elif grant_response.reason == "election_in_progress":
+					print(f"[{my_id}] Election in progress, backing off...")
+					time.sleep(2)
+					continue
+				elif grant_response.reason == "no_primary_available":
+					print(f"[{my_id}] No primary available, waiting for coordinator...")
+					node_state = STATE_WAITING_FOR_COORDINATOR
+					break
 				else:
 					print(f"[{my_id}] NACK received: {grant_response.reason}, retrying...")
 					term = max(term, grant_response.term)
@@ -115,10 +123,32 @@ def run_smart_node(node_id: Optional[str] = None, coord_ip: str = '127.0.0.1', c
 
 			# Handle ACK without GRANT (request queued)
 			if isinstance(grant_response, ACK) and grant_response.msg_type == "REQ":
-				print(f"[{my_id}] REQ acknowledged but no GRANT - request queued")
-				delay, backoff_delay = calculate_backoff_delay(backoff_delay)
-				time.sleep(delay)
-				continue
+				print(f"[{my_id}] REQ acknowledged - waiting for GRANT from coordinator")
+				# Wait passively for coordinator to push GRANT (indefinite)
+				while True:
+					try:
+						sock.settimeout(5.0)  # Short timeout to check for coordinator changes
+						data, recv_addr = sock.recvfrom(1024)
+						response = deserialize(data)
+						if isinstance(response, GRANT):
+							print(f"[{my_id}] GRANT received with lease_duration={response.lease_duration}")
+							term = max(term, response.term)
+							granted = True
+							break
+						elif isinstance(response, COORDINATOR):
+							# New coordinator announced - may need to re-request
+							print(f"[{my_id}] New coordinator announced during wait: {response.coord_id}")
+							coord_addr = response.coord_addr
+							backoff_delay = INITIAL_BACKOFF
+							break  # Exit to re-request from new coordinator
+					except socket.timeout:
+						continue  # Keep waiting
+					except Exception as e:
+						print(f"[{my_id}] Error while waiting for GRANT: {e}")
+						break  # Exit wait loop on error
+				if granted:
+					break  # Exit main retry loop
+				# If we got here without being granted, continue to retry with new coordinator
 
 			# Handle GRANT - exit loop immediately
 			if isinstance(grant_response, GRANT):
