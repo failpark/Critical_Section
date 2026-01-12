@@ -6,8 +6,16 @@ import os
 from collections import deque
 from typing import Optional, Dict, List, Tuple, Any
 from dataclasses import dataclass, field
+from xmlrpc.client import boolean
+
 from protocol import REQ, GRANT, REL, HB, ACK, NACK, SYNC, SYNC_ACK, COORD_HB, COORD_HB_ACK, COORDINATOR, ELECTION, OK, STEP_DOWN, serialize, deserialize, Message
 from failures import MessageDropWrapper, NodeFailureSimulator
+from rich.live import Live
+from rich.table import Table
+from rich.panel import Panel
+from rich.progress import Progress, BarColumn, TimeRemainingColumn
+from rich.layout import Layout
+from rich.console import Console
 
 
 @dataclass
@@ -120,6 +128,12 @@ class Coordinator:
         self.client_thread = None
         self.coord_thread = None
         self.heartbeat_thread = None
+
+    def start_with_dashboard(self):
+        self.start()
+        dashboard = CoordinatorTerminalDashboard(self)
+        dashboard.start()
+        return dashboard
     
     def start(self):
         """Start the coordinator server."""
@@ -940,6 +954,8 @@ def main():
                       help='Coordinator role: primary or backup')
     parser.add_argument('--id', type=int, required=True,
                       help='Coordinator ID (98,99,100 for backups; 100 for primary)')
+    parser.add_argument('--visualisation', type=bool, default=False,
+                        help='Add visualsation for coordinator (default=False)')
     parser.add_argument('--peers', type=str, default='',
                       help='Comma-separated list of peer coordinator addresses (ip:port,ip:port)')
     parser.add_argument('--host', default='0.0.0.0',
@@ -962,6 +978,7 @@ def main():
 
     peers = parse_peers(args.peers)
     role = args.role.upper()
+    vis = args.visualisation
 
     coordinator = Coordinator(
         host=args.host,
@@ -976,7 +993,11 @@ def main():
     )
     
     try:
-        coordinator.start()
+        if vis:
+            dashboard = coordinator.start_with_dashboard()
+        else:
+            coordinator.start()
+
         
         print("Coordinator running. Press Ctrl+C to stop.")
         while coordinator.running:
@@ -986,6 +1007,137 @@ def main():
         print("\nStopping Coordinator...")
     finally:
         coordinator.stop()
+
+class CoordinatorTerminalDashboard:
+    """
+    Terminal-based live dashboard using Rich.
+    Safe for CLI, Docker, SSH.
+    """
+
+    def __init__(self, coordinator: "Coordinator", refresh_hz: float = 5.0):
+        self.coordinator = coordinator
+        self.refresh_interval = 1.0 / refresh_hz
+        self.console = Console(force_terminal=True)
+        self.running = True
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def stop(self):
+        self.running = False
+
+    def _build_layout(self):
+        layout = Layout()
+
+        layout.split_column(
+            Layout(name="header", size=3),
+            Layout(name="body"),
+            Layout(name="footer", size=3),
+        )
+
+        layout["body"].split_row(
+            Layout(name="left"),
+            Layout(name="right"),
+        )
+
+        return layout
+
+    def _render_header(self, state):
+        text = (
+            f"[bold]Coordinator[/bold] | "
+            f"Role: [cyan]{state['role']}[/cyan] | "
+            f"Term: [yellow]{state['term']}[/yellow]"
+        )
+        return Panel(text, style="bold white on blue")
+
+    def _render_nodes(self, state):
+        table = Table(title="Nodes", expand=True)
+        table.add_column("Node", style="bold")
+        table.add_column("State")
+        table.add_column("Info")
+
+        waiting = [x[0] for x in state["queue"]]
+
+        for nid in sorted(state["known_nodes"]):
+            if nid == state["current_holder"]:
+                rem = state["lease_remaining"]
+                table.add_row(
+                    nid,
+                    "[green]RUNNING[/green]",
+                    f"{rem:0.1f}s remaining"
+                )
+            elif nid in waiting:
+                pos = waiting.index(nid) + 1
+                table.add_row(
+                    nid,
+                    "[yellow]WAITING[/yellow]",
+                    f"position {pos}"
+                )
+            else:
+                table.add_row(
+                    nid,
+                    "[dim]IDLE[/dim]",
+                    "-"
+                )
+
+        return Panel(table, title="Clients")
+
+    def _render_queue(self, state):
+        table = Table(title="Queue", expand=True)
+        table.add_column("#", justify="right")
+        table.add_column("Node")
+
+        for i, (nid, _, _) in enumerate(state["queue"], start=1):
+            table.add_row(str(i), nid)
+
+        if not state["queue"]:
+            table.add_row("-", "[dim]empty[/dim]")
+
+        return Panel(table)
+
+    def _render_backups(self, state):
+        table = Table(title="Backups", expand=True)
+        table.add_column("Address")
+        table.add_column("Status")
+
+        for addr, status in state["backup_status"].items():
+            color = {
+                "healthy": "green",
+                "suspect": "yellow",
+                "unreachable": "red"
+            }.get(status, "white")
+
+            table.add_row(addr, f"[{color}]{status}[/{color}]")
+
+        if not state["backup_status"]:
+            table.add_row("-", "[dim]none[/dim]")
+
+        return Panel(table)
+
+    def _render_footer(self, state):
+        text = (
+            f"Lease expiry: {state['lease_expiry']:.1f} | "
+            f"Primary suspected failed: {state['primary_suspected_failed']}"
+        )
+        return Panel(text, style="dim")
+
+    def _run(self):
+        layout = self._build_layout()
+
+        with Live(layout, console=self.console, refresh_per_second=10):
+            while self.running and self.coordinator.running:
+                state = self.coordinator.get_state()
+
+                layout["header"].update(self._render_header(state))
+                layout["left"].update(self._render_nodes(state))
+                layout["right"].update(self._render_queue(state))
+                layout["footer"].update(self._render_footer(state))
+
+                time.sleep(self.refresh_interval)
+
+        self.console.print("[bold red]Dashboard stopped[/bold red]")
+
 
 
 if __name__ == "__main__":

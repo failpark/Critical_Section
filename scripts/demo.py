@@ -6,6 +6,183 @@ import signal
 import argparse
 from typing import Optional, List
 from dataclasses import dataclass
+from rich.live import Live
+from rich.table import Table
+from rich.panel import Panel
+from rich.console import Console
+from rich.layout import Layout
+import threading
+import time
+from typing import Dict
+import re
+
+NODE_RE = re.compile(r"\[(Node_\d+)\]")
+COORD_RE = re.compile(r"\[(Primary|Backup_\d+|Coordinator_\d+)\]")
+CONTAINER_RE = re.compile(r"^(cs_[a-zA-Z0-9_]+)\s+\|")
+
+
+
+class DemoClusterDashboard:
+	"""
+    Live dashboard for the demo cluster.
+    Displays nodes, coordinators, roles, and general system status.
+    """
+
+	STALE_TIMEOUT = 15  # seconds before removing inactive entries
+
+	def __init__(self, refresh_hz: float = 2.0):
+		self.console = Console(force_terminal=True)
+		self.refresh_interval = 1.0 / refresh_hz
+		self.running = True
+		self.thread = threading.Thread(target=self._run, daemon=True)
+
+		# Internal authoritative state
+		self.state: Dict[str, Dict] = {
+			"nodes": {},          # id -> {role, status, last_update}
+			"coordinators": {},   # id -> {role, status, last_update}
+			"system_status": "Initializing..."
+		}
+
+	# ---------- lifecycle ----------
+
+	def start(self):
+		self.thread.start()
+
+	def stop(self):
+		self.running = False
+
+	# ---------- helpers ----------
+
+	def _norm_id(self, raw: str) -> str:
+		"""Normalize IDs to prevent duplicates"""
+		return raw.strip().replace(" ", "").upper()
+
+	def _cleanup_stale(self):
+		now = time.time()
+
+		for bucket in ("nodes", "coordinators"):
+			for key, info in list(self.state[bucket].items()):
+				if now - info.get("last_update", now) > self.STALE_TIMEOUT:
+					del self.state[bucket][key]
+
+	# ---------- public API ----------
+
+	def update_state(
+		self,
+		nodes: Dict[str, Dict],
+		coordinators: Dict[str, Dict],
+		system_status: str
+	):
+		now = time.time()
+
+		for nid, info in nodes.items():
+			nid = self._norm_id(nid)
+			self.state["nodes"][nid] = {
+				"role": info.get("role", "-"),
+				"status": info.get("status", "-"),
+				"last_update": now
+			}
+
+		for cid, info in coordinators.items():
+			cid = self._norm_id(cid)
+			self.state["coordinators"][cid] = {
+				"role": info.get("role", "-"),
+				"status": info.get("status", "-"),
+				"last_update": now
+			}
+
+		self.state["system_status"] = system_status
+		self._cleanup_stale()
+
+	# ---------- rendering ----------
+
+	def _build_layout(self):
+		layout = Layout()
+		layout.split_column(
+			Layout(name="header", size=3),
+			Layout(name="body"),
+			Layout(name="footer", size=3),
+		)
+		layout["body"].split_row(
+			Layout(name="left"),
+			Layout(name="right")
+		)
+		return layout
+
+	def _render_header(self):
+		text = (
+			f"[bold blue]Demo Cluster Dashboard[/bold blue] | "
+			f"Status: [yellow]{self.state['system_status']}[/yellow]"
+		)
+		return Panel(text, style="bold white on dark_green")
+
+	def _render_nodes_table(self):
+		table = Table(title="Nodes", expand=True)
+		table.add_column("Node")
+		table.add_column("Role")
+		table.add_column("Status")
+
+		for nid, info in sorted(self.state["nodes"].items()):
+			status_color = {
+				"RUNNING": "green",
+				"WAITING": "yellow",
+				"FAILED": "red",
+			}.get(info.get("status"), "white")
+
+			table.add_row(
+				nid,
+				info.get("role", "-"),
+				f"[{status_color}]{info.get('status', '-')}[/{status_color}]"
+			)
+
+		if not self.state["nodes"]:
+			table.add_row("-", "-", "-")
+
+		return Panel(table)
+
+	def _render_coordinators_table(self):
+		table = Table(title="Coordinators", expand=True)
+		table.add_column("Coordinator")
+		table.add_column("Role")
+		table.add_column("Status")
+
+		for cid, info in sorted(self.state["coordinators"].items()):
+			status_color = {
+				"PRIMARY": "green",
+				"BACKUP": "cyan",
+				"CANDIDATE": "yellow",
+				"FAILED": "red",
+			}.get(info.get("role"), "white")
+
+			table.add_row(
+				cid,
+				info.get("role", "-"),
+				f"[{status_color}]{info.get('status', '-')}[/{status_color}]"
+			)
+
+		if not self.state["coordinators"]:
+			table.add_row("-", "-", "-")
+
+		return Panel(table)
+
+	def _render_footer(self):
+		return Panel(
+			f"Nodes: {len(self.state['nodes'])} | "
+			f"Coordinators: {len(self.state['coordinators'])}"
+		)
+
+	def _run(self):
+		layout = self._build_layout()
+		with Live(layout, console=self.console, refresh_per_second=10):
+			while self.running:
+				layout["header"].update(self._render_header())
+				layout["left"].update(self._render_nodes_table())
+				layout["right"].update(self._render_coordinators_table())
+				layout["footer"].update(self._render_footer())
+				time.sleep(self.refresh_interval)
+
+		self.console.print("[bold red]Demo Dashboard stopped[/bold red]")
+
 
 @dataclass
 class DemoResult:
@@ -15,9 +192,10 @@ class DemoResult:
 	details: str
 
 class DockerDemoRunner:
-	def __init__(self, compose_file: str = "docker-compose.yml"):
+	def __init__(self, compose_file: str = "docker-compose.yml", dashboard: Optional[DemoClusterDashboard] = None):
 		self.compose_file = compose_file
 		self.process: Optional[subprocess.Popen] = None
+		self.dashboard = dashboard
 
 	def docker_compose_cmd(self, *args: str) -> List[str]:
 		return ["docker-compose", "-f", self.compose_file] + list(args)
@@ -62,6 +240,60 @@ class DockerDemoRunner:
 				line = self.process.stdout.readline()
 				if line:
 					print(line.rstrip())
+					if self.dashboard:
+						nodes_update = {}
+						coords_update = {}
+						system_status = "Regular traffic"
+
+						# --- Node updates ---
+						if "REQ" in line:
+							m = NODE_RE.search(line)
+							if m:
+								node = m.group(1)
+								nodes_update[node] = {"role": "CLIENT", "status": "WAITING"}
+
+						elif "GRANT" in line:
+							m = NODE_RE.search(line)
+							if m:
+								node = m.group(1)
+								nodes_update[node] = {"role": "CLIENT", "status": "RUNNING"}
+
+						# --- Coordinator updates ---
+						elif "ELECTION" in line:
+							m = CONTAINER_RE.search(line)
+							if m:
+								coord = m.group(1)
+								coords_update[coord] = {"role": "CANDIDATE", "status": "RUNNING"}
+								system_status = "Running election"
+
+						elif "COORDINATOR" in line or "LEADER" in line or "PRIMARY" in line:
+							m = CONTAINER_RE.search(line)
+							if m:
+								new_primary = m.group(1)
+								# Assign PRIMARY to this coordinator
+								coords_update[new_primary] = {"role": "PRIMARY", "status": "RUNNING"}
+
+								# Make all other known coordinators BACKUP
+								for existing_coord in self.dashboard.state["coordinators"]:
+									if existing_coord != new_primary:
+										# Only overwrite if not a candidate
+										current_role = self.dashboard.state["coordinators"][existing_coord].get("role")
+										if current_role != "CANDIDATE":
+											coords_update[existing_coord] = {"role": "BACKUP",
+																			 "status":
+																				 self.dashboard.state["coordinators"][
+																					 existing_coord].get("status",
+																										 "RUNNING")}
+								system_status = "Regular traffic"
+
+						# --- Update dashboard ---
+						if nodes_update or coords_update:
+							self.dashboard.update_state(
+								nodes=nodes_update,
+								coordinators=coords_update,
+								system_status=system_status
+							)
+
 				else:
 					break
 		except KeyboardInterrupt:
@@ -92,6 +324,15 @@ class DockerDemoRunner:
 
 		if not self.start_cluster():
 			return DemoResult("critical_section", False, 0.0, "Failed to start cluster")
+
+		if self.dashboard:
+			self.dashboard.update_state(
+				nodes={},
+				coordinators={
+					"Coordinator_1": {"role": "PRIMARY", "status": "RUNNING"}
+				},
+				system_status="Regular traffic"
+			)
 
 		print("\nWaiting 5 seconds for cluster initialization...")
 		time.sleep(5)
@@ -164,16 +405,29 @@ class DockerDemoRunner:
 	def run_scenario_all(self) -> List[DemoResult]:
 		results = []
 
+		dashboard =DemoClusterDashboard()
+		dashboard.start()
+		self.dashboard = dashboard
+
 		result1 = self.run_scenario_critical_section()
 		results.append(result1)
+
+		dashboard.stop()
 
 		print("\n\n" + "="*60)
 		print("Waiting 5 seconds before next scenario...")
 		print("="*60)
 		time.sleep(5)
 
+		dashboard = DemoClusterDashboard()
+		dashboard.start()
+		self.dashboard = dashboard
+
 		result2 = self.run_scenario_leader_election()
 		results.append(result2)
+
+		dashboard.stop()
+
 
 		return results
 
@@ -214,6 +468,8 @@ def main():
 
 	signal.signal(signal.SIGINT, cleanup_handler)
 	signal.signal(signal.SIGTERM, cleanup_handler)
+
+
 
 	try:
 		results = []

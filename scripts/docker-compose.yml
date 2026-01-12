@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
     primary:
-        build: .
+        build: ..
         container_name: cs_primary
         command:
             - critical/coordinator.py
@@ -22,7 +22,7 @@ services:
             - "50001:50001/udp"
 
     backup1:
-        build: .
+        build: ..
         container_name: cs_backup1
         command:
             - critical/coordinator.py
@@ -41,7 +41,7 @@ services:
             - primary
 
     backup2:
-        build: .
+        build: ..
         container_name: cs_backup2
         command:
             - critical/coordinator.py
@@ -60,7 +60,7 @@ services:
             - primary
 
     node1:
-        build: .
+        build: ..
         container_name: cs_node1
         command:
             - critical/node.py
@@ -78,7 +78,7 @@ services:
             - backup2
 
     node2:
-        build: .
+        build: ..
         container_name: cs_node2
         command:
             - critical/node.py
@@ -96,7 +96,7 @@ services:
             - backup2
 
     node3:
-        build: .
+        build: ..
         container_name: cs_node3
         command:
             - critical/node.py

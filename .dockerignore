@@ -17,4 +17,4 @@ htmlcov
 justfile
 scripts
 cluster_config.json
-docker-compose.yml
+scripts/docker-compose.yml
